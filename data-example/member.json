@@ -1,0 +1,21 @@
+[
+    {
+        "phone": " ",
+        "name": " ",
+        "npm": " ",
+        "studyProgram": " ",
+        "role": " ",
+        "managementRole": " ",
+        "suggestion": " "
+    },
+    //   Tambahkan data untuk 1 orang 1 format dengan koma sebagai pemisah
+    {
+        "phone": " ",
+        "name": " ",
+        "npm": " ",
+        "studyProgram": " ",
+        "role": " ",
+        "managementRole": " ",
+        "suggestion": " "
+    }
+]
