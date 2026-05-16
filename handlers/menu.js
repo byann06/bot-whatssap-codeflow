@@ -95,7 +95,7 @@ const LINK_KOMUNITAS = `
 `;
 
 const LOGO_EXTENSIONS = ['.jpg', '.jpeg', '.png'];
-const AVAILABLE_COMMANDS = new Set(['menu', 'link', 'logo', 'drive auth', 'sirpai', 'info', 'daftar', 'pemateri', 'jadwalku', 'add', 'hadir', 'daftar hadir', 'codeflowchallenge', 'aspek penilaian']);
+const AVAILABLE_COMMANDS = new Set(['menu', 'link', 'logo', 'drive auth', 'sirpai', 'info', 'daftar', 'pemateri', 'jadwalku', 'add', 'hadir', 'daftar hadir', 'codeflowchallenge', 'aspek penilaian', 'upin ipin', 'cek lid']);
 const INFO_TEMPLATE = `
 *Informasi Akun Anggota*
 >> Nama :
@@ -104,6 +104,7 @@ const INFO_TEMPLATE = `
 >> Role : (Anggota/Pengurus)
 >> Pengurus : (Pembina/Ketua/Wakil Ketua/Sekretaris/Bendahara/Divisi Medig/Divisi Perlog)
 >> Berikan saran :
+>> LID : 
 
 *Noted:*
 - Jika role kamu *Anggota*, isi bagian *Pengurus* dengan \`-\`
@@ -143,8 +144,8 @@ const ATTENDANCE_FILE = path.join(__dirname, '..', 'data', 'attendance.json');
 const SIR_PAI_FILE = path.join(__dirname, '..', 'assets', 'sir-pai.jpg');
 const SIR_PAI_COOLDOWN_MS = 60 * 1000;
 const sirPaiCooldowns = new Map();
-const ADMIN_PHONE = process.env.ADMIN_PHONE.split(',').map(v => v.trim());
-const ADMIN_LID = process.env.ADMIN_LID.split(',').map(v => v.trim());;
+const ADMIN_PHONE = (process.env.ADMIN_PHONE || '').split(',').map(v => v.trim()).filter(Boolean);
+const ADMIN_LID = (process.env.ADMIN_LID || '').split(',').map(v => v.trim()).filter(Boolean);
 const ALLOWED_ROLE_VALUES = ['Anggota', 'Pengurus'];
 const ALLOWED_MANAGEMENT_VALUES = ['Pembina', 'Ketua', 'Wakil Ketua', 'Sekretaris', 'Bendahara', 'Divisi Medig', 'Divisi Perlog', '-'];
 
@@ -168,6 +169,15 @@ function normalizePhone(value) {
     }
 
     return digits;
+}
+
+function normalizeLid(value) {
+    const jid = String(value || '').trim();
+    return jid.endsWith('@lid') ? jid : '';
+}
+
+function normalizeNameKey(value) {
+    return String(value || '').trim().toLowerCase();
 }
 
 function normalizeRole(value) {
@@ -292,7 +302,7 @@ function parseDocumentationCommand(rawBody) {
 }
 
 function isAdminUser(senderPhone, msg) {
-    if (senderPhone === ADMIN_PHONE) {
+    if (ADMIN_PHONE.includes(normalizePhone(senderPhone))) {
         return true;
     }
 
@@ -332,11 +342,21 @@ function getDriveErrorMessage(error) {
     return messages[code] || `terjadi error dokumentasi: ${code || 'unknown_error'}`;
 }
 
-function recordAttendance(member, phone) {
+function getAttendanceIdentity(value) {
+    const lid = normalizeLid(value?.lid);
+    if (lid) {
+        return lid;
+    }
+
+    return normalizePhone(value?.phone || value);
+}
+
+function recordAttendance(member, identity = {}) {
     const attendance = loadAttendance();
     const dateKey = getWibDateKey();
     const todayRecords = Array.isArray(attendance[dateKey]) ? attendance[dateKey] : [];
-    const existingRecord = todayRecords.find((record) => normalizePhone(record.phone) === normalizePhone(phone));
+    const attendanceIdentity = getAttendanceIdentity(identity) || getAttendanceIdentity(member);
+    const existingRecord = todayRecords.find((record) => getAttendanceIdentity(record) === attendanceIdentity);
 
     if (existingRecord) {
         return { status: 'exists', dateKey, record: existingRecord };
@@ -344,7 +364,8 @@ function recordAttendance(member, phone) {
 
     const now = new Date();
     const record = {
-        phone: normalizePhone(phone),
+        phone: normalizePhone(identity.phone || member.phone),
+        lid: normalizeLid(identity.lid || member.lid),
         name: member.name || '-',
         npm: member.npm || '',
         role: member.role || '-',
@@ -483,11 +504,17 @@ function getLogoPaths() {
 }
 
 function getSenderPhone(contact, msg) {
-    const candidates = [msg.author, msg.from, contact?.id?._serialized];
+    const candidates = [
+        msg.author,
+        msg?.key?.participant,
+        contact?.id?._serialized,
+        msg.from,
+        msg?.key?.remoteJid,
+    ];
 
     for (const candidate of candidates) {
-        const sourceId = String(candidate || '');
-        if (!sourceId || sourceId.endsWith('@lid')) {
+        const sourceId = String(candidate || '').trim();
+        if (!sourceId || sourceId.endsWith('@lid') || sourceId.endsWith('@g.us') || sourceId.endsWith('@newsletter')) {
             continue;
         }
 
@@ -497,7 +524,39 @@ function getSenderPhone(contact, msg) {
         }
     }
 
-    return normalizePhone(String(contact?.id?._serialized || '').split('@')[0]);
+    return '';
+}
+
+function getSenderLid(contact, msg) {
+    const candidates = [
+        msg.author,
+        msg.from,
+        msg?.key?.participant,
+        msg?.key?.remoteJid,
+        contact?.id?._serialized,
+    ];
+
+    for (const candidate of candidates) {
+        const lid = normalizeLid(candidate);
+        if (lid) {
+            return lid;
+        }
+    }
+
+    return '';
+}
+
+function buildSenderIdentity(contact, msg, senderName) {
+    return {
+        phone: getSenderPhone(contact, msg),
+        lid: getSenderLid(contact, msg),
+        names: [...new Set([
+            senderName,
+            contact?.pushname,
+            contact?.name,
+            msg.pushName,
+        ].map(normalizeNameKey).filter(Boolean))],
+    };
 }
 
 function findMembersByPhone(phone) {
@@ -505,9 +564,79 @@ function findMembersByPhone(phone) {
     return loadMembers().filter((member) => normalizePhone(member.phone) === normalizedPhone);
 }
 
-function findPrimaryMemberByPhone(phone) {
-    const matchedMembers = findMembersByPhone(phone);
-    return matchedMembers.length === 1 ? matchedMembers[0] : null;
+function findMemberEntriesByIdentity(identity, options = {}) {
+    const members = loadMembers();
+    const matches = new Map();
+    const phone = normalizePhone(identity?.phone);
+    const lid = normalizeLid(identity?.lid);
+    const names = Array.isArray(identity?.names) ? identity.names : [];
+
+    members.forEach((member, index) => {
+        if (phone && normalizePhone(member.phone) === phone) {
+            matches.set(index, { member, index });
+            return;
+        }
+
+        if (lid && normalizeLid(member.lid) === lid) {
+            matches.set(index, { member, index });
+            return;
+        }
+
+        if (options.allowNameFallback && names.includes(normalizeNameKey(member.name))) {
+            matches.set(index, { member, index });
+        }
+    });
+
+    return [...matches.values()];
+}
+
+function findMembersByIdentity(identity, options = {}) {
+    const matchedEntries = findMemberEntriesByIdentity(identity, options);
+    if (matchedEntries.length === 1) {
+        rememberSenderIdentity(matchedEntries[0].index, identity);
+    }
+
+    return matchedEntries.map(({ member }) => member);
+}
+
+function rememberSenderIdentity(index, identity) {
+    if (!Number.isInteger(index) || index < 0) {
+        return;
+    }
+
+    const members = loadMembers();
+    const member = members[index];
+    if (!member) {
+        return;
+    }
+
+    let changed = false;
+    const phone = normalizePhone(identity?.phone);
+    const lid = normalizeLid(identity?.lid);
+
+    if (phone && normalizePhone(member.phone) !== phone) {
+        member.phone = phone;
+        changed = true;
+    }
+
+    if (lid && normalizeLid(member.lid) !== lid) {
+        member.lid = lid;
+        changed = true;
+    }
+
+    if (changed) {
+        saveMembers(members);
+    }
+}
+
+function findPrimaryMemberByIdentity(identity, options = {}) {
+    const matchedEntries = findMemberEntriesByIdentity(identity, options);
+    if (matchedEntries.length !== 1) {
+        return null;
+    }
+
+    rememberSenderIdentity(matchedEntries[0].index, identity);
+    return matchedEntries[0].member;
 }
 
 function findMemberByName(name) {
@@ -605,20 +734,35 @@ function parseAdminCommands(rawBody) {
     return actions.length > 0 ? actions : null;
 }
 
+function getMemberChatId(member) {
+    const lid = normalizeLid(member?.lid);
+    if (lid) {
+        return lid;
+    }
+
+    const phone = normalizePhone(member?.phone);
+    return phone ? `${phone}@s.whatsapp.net` : '';
+}
+
+function getMentionLabel(chatId) {
+    return `@${String(chatId || '').split('@')[0]}`;
+}
+
 function buildAdminPemateriReply(schedule) {
     const mentions = [];
     const recipients = [];
     const lines = schedule.speakers.map((speaker, index) => {
         const member = findMemberByName(speaker.name);
-        if (member?.phone) {
-            const chatId = `${normalizePhone(member.phone)}@s.whatsapp.net`;
+        const chatId = getMemberChatId(member);
+        if (chatId) {
             mentions.push(chatId);
             recipients.push({
                 name: member.name,
                 phone: normalizePhone(member.phone),
+                lid: normalizeLid(member.lid),
                 chatId,
             });
-            return `${index + 1}. @${normalizePhone(member.phone)}`;
+            return `${index + 1}. ${getMentionLabel(chatId)}`;
         }
 
         return `${index + 1}. ${speaker.name || '-'}`;
@@ -773,7 +917,8 @@ async function handleMessage(msg, client) {
 
     const contact = await msg.getContact().catch(() => null);
     const senderName = contact?.pushname || contact?.name || author || from;
-    const senderPhone = getSenderPhone(contact, msg);
+    const senderIdentity = buildSenderIdentity(contact, msg, senderName);
+    const senderPhone = senderIdentity.phone;
     const addCommand = parseAddCommand(rawBody);
     const registerCommand = parseRegisterCommand(rawBody);
     const adminCommands = parseAdminCommands(rawBody);
@@ -794,7 +939,8 @@ async function handleMessage(msg, client) {
         logInteraction('WARN', `chat=${from} | reason=getChat_failed | error="${error.message}"`);
     }
 
-    logInteraction('INCOMING', `${chatType} | from=${senderName} | chat=${from} | body="${msg.body}" | command="${body || '-'}"`);
+    const shouldLogCommand = primaryCommand === 'documentation' || AVAILABLE_COMMANDS.has(primaryCommand) || Boolean(adminCommands) || documentationUploadCommand;
+    logInteraction('INCOMING', `${chatType} | chat=${from} | phone=${senderIdentity.phone || '-'} | lid=${senderIdentity.lid || '-'} | messageLength=${String(msg.body || '').length}${shouldLogCommand ? ` | command=${primaryCommand || '-'}` : ''}`);
 
     if (isAdminUser(senderPhone, msg) && adminCommands) {
         const quotedMessage = msg.hasQuotedMsg ? await msg.getQuotedMessage().catch(() => null) : null;
@@ -1029,9 +1175,9 @@ async function handleMessage(msg, client) {
             break;
 
         case 'hadir': {
-            const matchedMembers = findMembersByPhone(senderPhone);
+            const matchedMembers = findMembersByIdentity(senderIdentity, { allowNameFallback: true });
             if (matchedMembers.length === 0) {
-                logInteraction('OUTGOING', 'reply=attendance_not_registered | to=' + senderName);
+                logInteraction('OUTGOING', 'reply=attendance_not_registered | to=' + senderName + ' | phone=' + (senderIdentity.phone || '-') + ' | lid=' + (senderIdentity.lid || '-') + ' | names=' + (senderIdentity.names.join('|') || '-'));
                 await replyToUser(msg, contact, senderName, 'data kamu belum terdaftar, jadi kehadiran belum bisa dicatat. Silakan daftar dulu dengan format:\n' + REGISTER_TEMPLATE);
                 break;
             }
@@ -1042,7 +1188,7 @@ async function handleMessage(msg, client) {
                 break;
             }
 
-            const attendanceResult = recordAttendance(matchedMembers[0], senderPhone);
+            const attendanceResult = recordAttendance(matchedMembers[0], senderIdentity);
             if (attendanceResult.status === 'exists') {
                 logInteraction('OUTGOING', 'reply=attendance_exists | to=' + senderName + ' | date=' + attendanceResult.dateKey);
                 await replyToUser(msg, contact, senderName, 'kehadiran kamu hari ini sudah tercatat pada ' + (attendanceResult.record.time || '-') + ' WIB.');
@@ -1073,7 +1219,7 @@ async function handleMessage(msg, client) {
 
         case 'info': {
             logInteraction('OUTGOING', `reply=info | to=${senderName}`);
-            const matchedMembers = findMembersByPhone(senderPhone);
+            const matchedMembers = findMembersByIdentity(senderIdentity, { allowNameFallback: true });
 
             if (matchedMembers.length === 0) {
                 await replyToUser(msg, contact, senderName, `data kamu belum terdaftar di sistem bot. Silakan daftar dulu dengan format:\n\`${REGISTER_TEMPLATE}\`\n\nContoh:\n\`daftar | ${senderName} | Belum Diinput | Sistem Informasi | Anggota | - | Ingin ikut aktif\``);
@@ -1088,7 +1234,7 @@ async function handleMessage(msg, client) {
                 ? '\n\n*Noted:* nomor ini terhubung ke lebih dari satu profil. Tolong hubungi admin untuk merapikan data duplikat sebelum memakai command `add`.'
                 : '';
 
-            await replyToUser(msg, contact, senderName, `${memberSections}\n\n*Noted:* bot ini masih tahap build. Jika ada data yang salah atau kosong, gunakan command seperti:\n- \`add npm 24042231035\`\n- \`add no 628123456789\`\n- \`add prodi Sistem Informasi\`\n- \`add saran Perbanyak kegiatan rutin\`${duplicateNote}`);
+            await replyToUser(msg, contact, senderName, `${memberSections}`);
             break;
         }
 
@@ -1106,9 +1252,7 @@ async function handleMessage(msg, client) {
             }
 
             const members = loadMembers();
-            const matchedIndexes = members
-                .map((member, index) => ({ member, index }))
-                .filter(({ member }) => normalizePhone(member.phone) === senderPhone);
+            const matchedIndexes = findMemberEntriesByIdentity(senderIdentity, { allowNameFallback: true });
 
             if (matchedIndexes.length > 0) {
                 logInteraction('OUTGOING', `reply=register_exists | to=${senderName}`);
@@ -1118,6 +1262,7 @@ async function handleMessage(msg, client) {
 
             members.push({
                 phone: senderPhone,
+                ...(senderIdentity.lid && { lid: senderIdentity.lid }),
                 ...registerCommand.value,
             });
 
@@ -1143,7 +1288,8 @@ async function handleMessage(msg, client) {
             break;
 
         case 'jadwalku': {
-            const memberProfile = findPrimaryMemberByPhone(senderPhone);
+            pemateriData.refreshScheduleReference();
+            const memberProfile = findPrimaryMemberByIdentity(senderIdentity, { allowNameFallback: true });
             const lookupName = memberProfile?.name || senderName;
             const schedule = pemateriData.findSpeakerSchedule(lookupName);
             if (!schedule) {
@@ -1172,9 +1318,7 @@ async function handleMessage(msg, client) {
             }
 
             const members = loadMembers();
-            const matchedIndexes = members
-                .map((member, index) => ({ member, index }))
-                .filter(({ member }) => normalizePhone(member.phone) === senderPhone);
+            const matchedIndexes = findMemberEntriesByIdentity(senderIdentity, { allowNameFallback: true });
 
             if (matchedIndexes.length === 0) {
                 logInteraction('OUTGOING', `reply=add_not_found | to=${senderName}`);
@@ -1261,6 +1405,60 @@ async function handleMessage(msg, client) {
             }
             break;
         }
+        case 'upin ipin': {
+            // Nomor bot Bridges (Ipin) — ganti dengan nomor aslinya
+            const ipinNumber = '6283166111757@s.whatsapp.net'; // ← ganti ini
+
+            await client.sock.sendMessage(msg.key.remoteJid, {
+                text: `Halo saya Upin! 🌙\n@${ipinNumber.split('@')[0]}`,
+                mentions: [ipinNumber]
+            });
+            break;
+        }
+        case 'cek lid': {
+            if (!isAdminUser(senderPhone, msg)) {
+                logInteraction('SKIP', `${chatType} | from=${senderName} | reason=cek_lid_admin_only`);
+                break;
+            }
+
+            const mentionedIds = msg.mentionedIds || [];
+            if (mentionedIds.length === 0) {
+                await replyToUser(msg, contact, senderName, 'tag anggota yang mau dicek LID-nya. Contoh: `cek lid @anggota`');
+                break;
+            }
+
+            const lidLines = mentionedIds.map((jid) => {
+                const normalized = String(jid || '').trim();
+                const isLid = normalized.endsWith('@lid');
+                const label = `@${normalized.split('@')[0]}`;
+                return isLid
+                    ? `${label} → \`${normalized}\``
+                    : `${label} → _(LID tidak tersedia, hanya phone)_`;
+            });
+
+            logInteraction('OUTGOING', `reply=cek_lid | to=${senderName} | count=${mentionedIds.length}`);
+
+            const sentMsg = await replyToUser(msg, contact, senderName, `*Hasil Cek LID:*\n\n${lidLines.join('\n')}`);
+
+            // Hapus pesan bot setelah 10 detik
+            // setTimeout(async () => {
+            //     try {
+            //         await client.sock.sendMessage(msg.from, {
+            //             delete: sentMsg.key,
+            //         });
+
+            //         await client.sock.sendMessage(msg.from, {
+            //             delete: msg.key,
+            //         });
+
+            //         logInteraction('OUTGOING', `delete=cek_lid | to=${senderName}`);
+            //     } catch (err) {
+            //         logInteraction('WARN', `delete=cek_lid_failed | reason=${err.message}`);
+            //     }
+            // }, 15 * 1000);
+
+            break;
+        }
 
         default:
             logInteraction('SKIP', `${chatType} | from=${senderName} | reason=unknown_command`);
@@ -1269,6 +1467,8 @@ async function handleMessage(msg, client) {
 }
 
 module.exports = { handleMessage };
+
+
 
 
 

@@ -9,7 +9,10 @@
 const qrcode = require('qrcode-terminal');
 const path = require('path');
 const { handleMessage } = require('./handlers/menu');
+const fs = require('fs');
 
+const USE_PAIRING_CODE = process.argv.includes('pairing');
+const PAIRING_NUMBER = process.env.PAIRING_NUMBER?.replace(/\D/g, '') || '';
 const AUTH_DIR = path.join(__dirname, '.baileys_auth');
 let cachedVersion;
 const client = {
@@ -20,6 +23,9 @@ const client = {
         },
     },
 };
+
+
+
 
 function normalizeJid(value) {
     if (!value) {
@@ -286,17 +292,29 @@ async function startBot() {
 
     client.sock = sock;
 
-    sock.ev.on('creds.update', saveCreds);
+
+    let pairingRequested = false;
 
     sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
         if (qr) {
-            console.log('Scan QR ini dengan WhatsApp kamu:');
-            qrcode.generate(qr, { small: true });
+            if (USE_PAIRING_CODE && PAIRING_NUMBER && !pairingRequested) {
+                pairingRequested = true;
+                try {
+                    const code = await sock.requestPairingCode(PAIRING_NUMBER);
+                    console.log(`\n🔑 Pairing Code: ${code}`);
+                    console.log('Buka WhatsApp → Perangkat Tertaut → Tautkan dengan nomor telepon\n');
+                } catch (err) {
+                    console.error('Gagal dapat pairing code:', err.message);
+                }
+            } else {
+                console.log('Scan QR ini dengan WhatsApp kamu:');
+                qrcode.generate(qr, { small: true });
+            }
         }
 
         if (connection === 'open') {
             client.info.wid._serialized = normalizeJid(jidNormalizedUser(sock.user?.id || ''));
-            console.log('Bot siap!');
+            console.log('✅ Bot siap!');
         }
 
         if (connection === 'close') {
@@ -305,24 +323,25 @@ async function startBot() {
             console.log('Bot putus:', statusCode || 'unknown');
 
             if (shouldReconnect) {
+                console.log('🔄 Reconnecting...');
+                await startBot();
+            } else {
+                // ← Auto hapus auth folder kalau 401
+                console.log('❌ Sesi expired, menghapus auth dan restart otomatis...');
+                fs.rmSync(AUTH_DIR, { recursive: true, force: true });
                 await startBot();
             }
         }
     });
 
+    sock.ev.on('creds.update', saveCreds);
+
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') {
-            return;
-        }
+        if (type !== 'notify') return;
 
         for (const message of messages) {
-            if (!message?.message || !message?.key?.remoteJid || message.key.fromMe) {
-                continue;
-            }
-
-            if (message.key.remoteJid === 'status@broadcast') {
-                continue;
-            }
+            if (!message?.message || !message?.key?.remoteJid || message.key.fromMe) continue;
+            if (message.key.remoteJid === 'status@broadcast') continue;
 
             try {
                 const wrappedMessage = wrapMessage(sock, message);
