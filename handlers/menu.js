@@ -1,4 +1,4 @@
-﻿const fs = require('fs');
+const fs = require('fs');
 const path = require('path');
 
 class MessageMedia {
@@ -19,6 +19,7 @@ class MessageMedia {
 }
 const pemateriData = require('../data/pemateri');
 const driveDocs = require('./drive');
+const { loadDocsState, listFoldersFromDrive, removeFolder, getMediaType, uploadMediaBatch } = driveDocs;
 
 const MENU_TEXT = `
 >>menu - melihat daftar perintah bot 
@@ -95,7 +96,7 @@ const LINK_KOMUNITAS = `
 `;
 
 const LOGO_EXTENSIONS = ['.jpg', '.jpeg', '.png'];
-const AVAILABLE_COMMANDS = new Set(['menu', 'link', 'logo', 'drive auth', 'sirpai', 'info', 'daftar', 'pemateri', 'jadwalku', 'add', 'hadir', 'daftar hadir', 'codeflowchallenge', 'aspek penilaian', 'upin ipin', 'cek lid']);
+const AVAILABLE_COMMANDS = new Set(['menu', 'link', 'logo', 'drive auth', 'sirpai', 'info', 'daftar', 'pemateri', 'jadwalku', 'add', 'hadir', 'daftar hadir', 'codeflowchallenge', 'aspek penilaian', 'upin ipin', 'cek lid', 'min ukm di um apa aja ni?', 'folder list', 'jadwal absen', 'buat jadwal', 'liat jadwal', 'hapus jadwal', 'ubah jadwal', 'jam absen', 'close absen', 'buka absen', 'tutup absen', 'hapus hadir', 'izin', 'daftar izin']);
 const INFO_TEMPLATE = `
 *Informasi Akun Anggota*
 >> Nama :
@@ -146,8 +147,164 @@ const SIR_PAI_COOLDOWN_MS = 60 * 1000;
 const sirPaiCooldowns = new Map();
 const ADMIN_PHONE = (process.env.ADMIN_PHONE || '').split(',').map(v => v.trim()).filter(Boolean);
 const ADMIN_LID = (process.env.ADMIN_LID || '').split(',').map(v => v.trim()).filter(Boolean);
+// Antrian upload media per admin
+const uploadQueue = new Map();
+const UPLOAD_TIMEOUT_MS = 2 * 60 * 1000; // 2 menit
+const UPLOAD_WARNING_MS = 105 * 1000; // warning di DETIK ke-1:45
+const HADIR_LID = (process.env.HADIR_LID || '').split(',').map(v => v.trim()).filter(Boolean);
+const DOKUMENTASI_LID = (process.env.DOKUMENTASI_LID || '').split(',').map(v => v.trim()).filter(Boolean);
+const KOMUNIKASI_LID = (process.env.KOMUNIKASI_LID || '').split(',').map(v => v.trim()).filter(Boolean);
+const PEMATERI_LID = (process.env.PEMATERI_LID || '').split(',').map(v => v.trim()).filter(Boolean);
 const ALLOWED_ROLE_VALUES = ['Anggota', 'Pengurus'];
 const ALLOWED_MANAGEMENT_VALUES = ['Pembina', 'Ketua', 'Wakil Ketua', 'Sekretaris', 'Bendahara', 'Divisi Medig', 'Divisi Perlog', '-'];
+const ATTENDANCE_SESSIONS_KEY = '__sessions';
+const ATTENDANCE_ACTIVE_KEY = '__activeByChat';
+const ATTENDANCE_REMINDER_MINUTES = Number(process.env.ABSEN_REMINDER_MINUTES || 30);
+const attendanceReminderTimers = new Map();
+const BOT_NOTICE_GROUP_ID = process.env.BOT_NOTICE_GROUP_ID;
+
+async function sendBotNotice(client, text) {
+    if (!BOT_NOTICE_GROUP_ID || !client?.sock?.sendMessage) return;
+    try {
+        await client.sock.sendMessage(BOT_NOTICE_GROUP_ID, { text });
+    } catch (error) {
+        logInteraction('WARN', `bot_notice_failed | group=${BOT_NOTICE_GROUP_ID} | error="${error.message}"`);
+    }
+}
+const conversationStates = new Map();
+
+function getConversationKey(identity, chatId) {
+    return normalizeLid(identity?.lid) || normalizePhone(identity?.phone) || chatId || 'unknown';
+}
+
+function splitCommaValues(value) {
+    return String(value || '').split(',').map((part) => part.trim()).filter(Boolean);
+}
+
+function normalizeDateInput(value) {
+    const text = String(value || '').trim();
+    let match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+    match = text.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+    if (!match) return null;
+    return `${match[3]}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}`;
+}
+
+function normalizeTimeInput(value) {
+    const match = String(value || '').trim().match(/^([0-2]?\d)[.:]([0-5]\d)$/);
+    if (!match) return null;
+    const hour = Number(match[1]);
+    if (hour > 23) return null;
+    return `${String(hour).padStart(2, '0')}:${match[2]}`;
+}
+
+function parseTimeRange(value) {
+    const parts = String(value || '').split('-').map((part) => normalizeTimeInput(part));
+    return { startTime: parts[0] || null, endTime: parts[1] || null };
+}
+
+function isSkipValue(value) {
+    return /^(belum|nanti|skip|lewati|-|tidak)$/i.test(String(value || '').trim());
+}
+
+function parseRegisterText(rawBody) {
+    const text = String(rawBody || '').trim();
+    let payload = '';
+    if (/^daftar\s*\|/i.test(text)) {
+        return parseRegisterCommand(text);
+    }
+    if (/^daftar\s*:/i.test(text)) {
+        payload = text.replace(/^daftar\s*:/i, '').trim();
+    } else if (/^daftar\s*,/i.test(text)) {
+        payload = text.replace(/^daftar\s*,/i, '').trim();
+    } else if (/^daftar\s+/i.test(text)) {
+        payload = text.replace(/^daftar\s+/i, '').trim();
+    } else {
+        return null;
+    }
+
+    const data = {};
+    const aliases = {
+        nama: 'name', name: 'name', npm: 'npm', prodi: 'studyProgram', jurusan: 'studyProgram', role: 'role', pengurus: 'managementRole', jabatan: 'managementRole', saran: 'suggestion'
+    };
+    splitCommaValues(payload).forEach((segment) => {
+        const match = segment.match(/^([a-zA-Z]+)\s*[:=]?\s+(.+)$/);
+        if (!match) return;
+        const key = aliases[match[1].toLowerCase()];
+        if (key) data[key] = match[2].trim();
+    });
+
+    if (!Object.keys(data).length) return null;
+    return buildRegisterCommand(data);
+}
+
+function buildRegisterCommand(data) {
+    const name = String(data.name || '').trim();
+    const npm = String(data.npm || '').trim();
+    const studyProgram = String(data.studyProgram || '').trim();
+    const role = normalizeRole(data.role || 'Anggota');
+    const managementRole = normalizeManagementRole(data.managementRole || '-');
+    const suggestion = String(data.suggestion || '-').trim() || '-';
+
+    if (!name || !studyProgram) return { error: 'Nama dan prodi wajib diisi saat daftar.' };
+    if (!role) return { error: `Role hanya boleh *${ALLOWED_ROLE_VALUES.join('*, *')}*.` };
+    if (role === 'Pengurus') return { error: 'Pendaftaran sebagai *Pengurus* tidak bisa dilakukan lewat bot. Silakan hubungi admin untuk pendataan pengurus.' };
+    if (!managementRole) return { error: `Jabatan pengurus hanya boleh *${ALLOWED_MANAGEMENT_VALUES.join('*, *')}*.` };
+    if (managementRole !== '-') return { error: 'Maaf Daftar Data Hanya diKHUSUSkan untuk anggota. Isi pengurus dengan `-`.' };
+
+    return {
+        value: {
+            name,
+            npm: /^belum\s+diinput$/i.test(npm) ? '' : npm,
+            studyProgram,
+            role,
+            managementRole,
+            suggestion,
+        },
+    };
+}
+
+function getScheduleList() {
+    const attendance = loadAttendance();
+    const { sessions } = getAttendanceMeta(attendance);
+    return Object.values(sessions).sort((a, b) => String(a.dateKey || '').localeCompare(String(b.dateKey || '')) || String(a.startTime || '').localeCompare(String(b.startTime || '')));
+}
+
+function findScheduleByQuery(query, chatId) {
+    const schedules = getScheduleList();
+    const scope = getChatScope(chatId);
+    const raw = String(query || '').trim();
+    const numberMatch = raw.match(/^(?:jadwal\s*)?(\d+)$/i);
+    if (numberMatch) return schedules[Number(numberMatch[1]) - 1] || null;
+    const dateKey = normalizeDateInput(raw);
+    const normalized = normalizeNameKey(raw);
+    return schedules.find((session) =>
+        session.id === raw ||
+        session.dateKey === dateKey ||
+        normalizeNameKey(session.title) === normalized ||
+        normalizeNameKey(session.title).includes(normalized) ||
+        (session.chatId === scope && normalized === 'aktif')
+    ) || null;
+}
+
+function saveAttendanceSession(session) {
+    const attendance = loadAttendance();
+    const existing = findSessionById(attendance, session.id);
+    if (!existing) return null;
+    Object.assign(existing, session);
+    saveAttendance(attendance);
+    return existing;
+}
+
+function formatScheduleList() {
+    const schedules = getScheduleList();
+    if (!schedules.length) return 'belum ada jadwal absen.';
+    const lines = schedules.map((session, index) => {
+        const closeLabel = session.endTime ? `-${session.endTime.replace(':', '.')}` : '';
+        return `${index + 1}. ${getSessionTitle(session)} | ${formatDateKey(session.dateKey)} | ${(session.startTime || '-').replace(':', '.')}${closeLabel} | ${session.status}`;
+    });
+    return `*Jadwal Absen*\n${lines.join('\n')}`;
+}
 
 function logInteraction(type, details) {
     const timestamp = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
@@ -260,6 +417,337 @@ function formatDateKey(dateKey) {
     return year && month && day ? day + '/' + month + '/' + year : dateKey;
 }
 
+function parseWibDateTime(dateKey, timeLabel) {
+    const [year, month, day] = String(dateKey || '').split('-').map(Number);
+    const [hour, minute] = String(timeLabel || '').split(':').map(Number);
+    if (!year || !month || !day || !Number.isInteger(hour) || !Number.isInteger(minute)) {
+        return null;
+    }
+
+    return new Date(Date.UTC(year, month - 1, day, hour - 7, minute, 0));
+}
+
+function formatDateTimeLabel(dateKey, timeLabel) {
+    return `${formatDateKey(dateKey)} pukul ${String(timeLabel || '').replace(':', '.')} WIB`;
+}
+
+function slugifyId(value) {
+    return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'sesi';
+}
+
+function getChatScope(chatId) {
+    return chatId && chatId.endsWith('@g.us') ? chatId : 'global';
+}
+
+function getAttendanceMeta(attendance) {
+    if (!attendance[ATTENDANCE_SESSIONS_KEY] || typeof attendance[ATTENDANCE_SESSIONS_KEY] !== 'object') {
+        attendance[ATTENDANCE_SESSIONS_KEY] = {};
+    }
+
+    if (!attendance[ATTENDANCE_ACTIVE_KEY] || typeof attendance[ATTENDANCE_ACTIVE_KEY] !== 'object') {
+        attendance[ATTENDANCE_ACTIVE_KEY] = {};
+    }
+
+    return {
+        sessions: attendance[ATTENDANCE_SESSIONS_KEY],
+        activeByChat: attendance[ATTENDANCE_ACTIVE_KEY],
+    };
+}
+
+function getSessionRecords(session) {
+    if (!Array.isArray(session.records)) session.records = [];
+    return session.records;
+}
+
+function getSessionExcuses(session) {
+    if (!Array.isArray(session.excuses)) session.excuses = [];
+    return session.excuses;
+}
+
+function getSessionTitle(session) {
+    return session?.title || `Pertemuan ${session?.dateKey || ''}`.trim();
+}
+
+function findSessionById(attendance, sessionId) {
+    const { sessions } = getAttendanceMeta(attendance);
+    return sessions[sessionId] || null;
+}
+
+function findOpenSessionForChat(attendance, chatId) {
+    const { sessions, activeByChat } = getAttendanceMeta(attendance);
+    const scope = getChatScope(chatId);
+    const activeId = activeByChat[scope] || activeByChat.global;
+    const activeSession = activeId ? sessions[activeId] : null;
+    if (activeSession?.status === 'open') return activeSession;
+
+    return Object.values(sessions)
+        .filter((session) => session.status === 'open' && (session.chatId === scope || session.chatId === 'global'))
+        .sort((a, b) => String(b.openedAt || '').localeCompare(String(a.openedAt || '')))[0] || null;
+}
+
+function findRelevantSessionForExcuse(attendance, chatId) {
+    const open = findOpenSessionForChat(attendance, chatId);
+    if (open) return open;
+
+    const { sessions } = getAttendanceMeta(attendance);
+    const scope = getChatScope(chatId);
+    const now = new Date();
+    return Object.values(sessions)
+        .filter((session) => ['scheduled', 'open'].includes(session.status))
+        .filter((session) => session.chatId === scope || session.chatId === 'global' || scope === 'global')
+        .map((session) => ({ session, startsAt: parseWibDateTime(session.dateKey, session.startTime) }))
+        .filter((item) => !item.startsAt || item.startsAt.getTime() >= now.getTime() - 24 * 60 * 60 * 1000)
+        .sort((a, b) => (a.startsAt?.getTime() || 0) - (b.startsAt?.getTime() || 0))[0]?.session || null;
+}
+
+function createAttendanceSession(chatId, dateKey, startTime, title, createdBy, endTime = null) {
+    const attendance = loadAttendance();
+    const { sessions } = getAttendanceMeta(attendance);
+    const safeTitle = String(title || `Pertemuan ${formatDateKey(dateKey)}`).trim();
+    const idBase = `${dateKey}-${startTime}-${slugifyId(safeTitle)}`;
+    let id = idBase;
+    let counter = 2;
+    while (sessions[id]) {
+        id = `${idBase}-${counter}`;
+        counter += 1;
+    }
+
+    sessions[id] = {
+        id,
+        chatId: getChatScope(chatId),
+        title: safeTitle,
+        dateKey,
+        startTime,
+        ...(endTime && { endTime }),
+        status: 'scheduled',
+        createdBy: createdBy || '-',
+        createdAt: new Date().toISOString(),
+        reminderSent: false,
+        records: [],
+        excuses: [],
+    };
+
+    saveAttendance(attendance);
+    return sessions[id];
+}
+
+function openAttendanceSession(chatId, title) {
+    const attendance = loadAttendance();
+    const { sessions, activeByChat } = getAttendanceMeta(attendance);
+    const scope = getChatScope(chatId);
+    let session = Object.values(sessions)
+        .filter((item) => ['scheduled', 'open'].includes(item.status))
+        .filter((item) => item.chatId === scope || item.chatId === 'global')
+        .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0];
+
+    if (!session) {
+        const dateKey = getWibDateKey();
+        const nowTime = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+        session = createAttendanceSession(chatId, dateKey, nowTime, title || `Absensi ${formatDateKey(dateKey)}`, 'admin');
+    }
+
+    session.status = 'open';
+    session.openedAt = new Date().toISOString();
+    if (title) session.title = title;
+    activeByChat[scope] = session.id;
+    saveAttendance(attendance);
+    return session;
+}
+
+function closeAttendanceSession(chatId) {
+    const attendance = loadAttendance();
+    const session = findOpenSessionForChat(attendance, chatId);
+    if (!session) return null;
+    const { activeByChat } = getAttendanceMeta(attendance);
+    session.status = 'closed';
+    session.closedAt = new Date().toISOString();
+    for (const [scope, sessionId] of Object.entries(activeByChat)) {
+        if (sessionId === session.id) delete activeByChat[scope];
+    }
+    saveAttendance(attendance);
+    return session;
+}
+
+function recordAttendanceInSession(sessionId, member, identity = {}) {
+    const attendance = loadAttendance();
+    const session = findSessionById(attendance, sessionId);
+    if (!session) return { status: 'missing' };
+    const records = getSessionRecords(session);
+    const attendanceIdentity = getAttendanceIdentity(identity) || getAttendanceIdentity(member);
+    const existing = records.find((record) => getAttendanceIdentity(record) === attendanceIdentity);
+    if (existing) return { status: 'exists', session, record: existing };
+
+    const now = new Date();
+    const record = {
+        phone: normalizePhone(identity.phone || member.phone),
+        lid: normalizeLid(identity.lid || member.lid),
+        name: member.name || '-',
+        npm: member.npm || '',
+        role: member.role || '-',
+        status: 'hadir',
+        time: getWibTimeLabel(now),
+        timestamp: now.toISOString(),
+    };
+    records.push(record);
+    saveAttendance(attendance);
+    return { status: 'saved', session, record };
+}
+
+function recordExcuseInSession(sessionId, member, identity = {}, reason = '', proof = null) {
+    const attendance = loadAttendance();
+    const session = findSessionById(attendance, sessionId);
+    if (!session) return { status: 'missing' };
+    const excuses = getSessionExcuses(session);
+    const excuseIdentity = getAttendanceIdentity(identity) || getAttendanceIdentity(member);
+    const existing = excuses.find((record) => getAttendanceIdentity(record) === excuseIdentity);
+    const now = new Date();
+    const record = {
+        phone: normalizePhone(identity.phone || member.phone),
+        lid: normalizeLid(identity.lid || member.lid),
+        name: member.name || '-',
+        npm: member.npm || '',
+        role: member.role || '-',
+        status: 'izin',
+        reason: String(reason || '').trim() || '-',
+        proof: proof || null,
+        time: getWibTimeLabel(now),
+        timestamp: now.toISOString(),
+    };
+
+    if (existing) {
+        Object.assign(existing, record);
+    } else {
+        excuses.push(record);
+    }
+
+    saveAttendance(attendance);
+    return { status: existing ? 'updated' : 'saved', session, record };
+}
+
+function removeAttendanceFromSession(chatId, query) {
+    const attendance = loadAttendance();
+    const session = findOpenSessionForChat(attendance, chatId) || findRelevantSessionForExcuse(attendance, chatId);
+    if (!session) return { status: 'no_session' };
+    const normalizedQuery = normalizeNameKey(query);
+    const records = getSessionRecords(session);
+    const index = records.findIndex((record) =>
+        normalizeNameKey(record.name) === normalizedQuery ||
+        normalizeNameKey(record.npm) === normalizedQuery ||
+        normalizeNameKey(record.lid) === normalizedQuery
+    );
+    if (index < 0) return { status: 'not_found', session };
+    const [removed] = records.splice(index, 1);
+    saveAttendance(attendance);
+    return { status: 'removed', session, removed };
+}
+
+function formatAttendanceSessionReport(session) {
+    const records = getSessionRecords(session);
+    const excuses = getSessionExcuses(session);
+    const presentNames = new Set(records.map((record) => normalizeNameKey(record.name)).filter(Boolean));
+    const excuseNames = new Set(excuses.map((record) => normalizeNameKey(record.name)).filter(Boolean));
+    const alpaMembers = loadMembers().filter((member) => {
+        const nameKey = normalizeNameKey(member.name);
+        return nameKey && !presentNames.has(nameKey) && !excuseNames.has(nameKey);
+    });
+
+    const hadirLines = records.length
+        ? records.map((record, index) => `${index + 1}. ${record.name || '-'} - ${record.time || '-'} WIB`).join('\n')
+        : 'Belum ada yang hadir.';
+    const izinLines = excuses.length
+        ? excuses.map((record, index) => `${index + 1}. ${record.name || '-'} - ${record.reason || '-'}${record.proof ? ' (Memberikan Bukti Foto)' : ''}`).join('\n')
+        : 'Belum ada izin.';
+    const alpaLines = alpaMembers.length
+        ? alpaMembers.map((member, index) => `${index + 1}. ${member.name || '-'}`).join('\n')
+        : 'Tidak ada.';
+
+    return `*Daftar Hadir - ${getSessionTitle(session)}*\n${formatDateTimeLabel(session.dateKey, session.startTime)}\nStatus: ${session.status}\n\n*Hadir (${records.length})*\n${hadirLines}\n\n*Izin (${excuses.length})*\n${izinLines}\n\n*Alpa (${alpaMembers.length})*\n${alpaLines}`;
+}
+
+function parseAttendanceCommand(rawBody) {
+    const text = String(rawBody || '').trim();
+
+    if (/^buat\s+jadwal$/i.test(text)) return { primary: 'buat jadwal', type: 'schedule_prompt' };
+
+    const easySchedule = text.match(/^buat\s+jadwal\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*(.+)$/i);
+    if (easySchedule) {
+        const dateKey = normalizeDateInput(easySchedule[1]);
+        const range = parseTimeRange(easySchedule[2]);
+        return { primary: 'buat jadwal', type: 'schedule', dateKey, startTime: range.startTime, endTime: range.endTime, title: easySchedule[3].trim() };
+    }
+
+    const scheduleMatch = text.match(/^jadwal\s+absen\s*\|\s*([^|]+)\s*\|\s*([^|]+)(?:\s*\|\s*(.+))?$/i);
+    if (scheduleMatch) {
+        const dateKey = normalizeDateInput(scheduleMatch[1]);
+        const range = parseTimeRange(scheduleMatch[2]);
+        return { primary: 'jadwal absen', type: 'schedule', dateKey, startTime: range.startTime, endTime: range.endTime, title: (scheduleMatch[3] || '').trim() };
+    }
+
+    if (/^(liat|lihat)\s+jadwal$/i.test(text)) return { primary: 'liat jadwal', type: 'schedule_list' };
+
+    const deleteSchedule = text.match(/^hapus\s+jadwal\s*,\s*(.+)$/i);
+    if (deleteSchedule) return { primary: 'hapus jadwal', type: 'schedule_delete', query: deleteSchedule[1].trim() };
+
+    const changeSchedule = text.match(/^ubah\s+jadwal\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*(.+)$/i);
+    if (changeSchedule) return { primary: 'ubah jadwal', type: 'schedule_update', query: changeSchedule[1].trim(), field: changeSchedule[2].trim().toLowerCase(), value: changeSchedule[3].trim() };
+
+    const startUpdate = text.match(/^jam\s+absen\s*,?\s*(.+)$/i);
+    if (startUpdate) return { primary: 'jam absen', type: 'schedule_set_start', value: startUpdate[1].trim() };
+
+    const closeUpdate = text.match(/^close\s+absen\s*,?\s*(.+)$/i);
+    if (closeUpdate) return { primary: 'close absen', type: 'schedule_set_end', value: closeUpdate[1].trim() };
+
+    const openMatch = text.match(/^buka\s+absen(?:\s*[,|]\s*(.+))?$/i);
+    if (openMatch) return { primary: 'buka absen', type: 'open', title: (openMatch[1] || '').trim() };
+
+    if (/^tutup\s+absen$/i.test(text)) return { primary: 'tutup absen', type: 'close' };
+
+    const removeMatch = text.match(/^hapus\s+hadir\s+(.+)$/i);
+    if (removeMatch) return { primary: 'hapus hadir', type: 'remove', query: removeMatch[1].trim() };
+
+    const excuseMatch = text.match(/^izin(?:\s*[|,]\s*(.+))?$/i);
+    if (excuseMatch) return { primary: 'izin', type: 'excuse', reason: (excuseMatch[1] || '').trim() };
+
+    const excuseListMatch = text.match(/^daftar\s+izin(?:\s+(.+))?$/i);
+    if (excuseListMatch) return { primary: 'daftar izin', type: 'excuse_report', dateKey: normalizeDateInput(excuseListMatch[1]) || getWibDateKey() };
+
+    return null;
+} function scheduleAttendanceReminder(client, session, targetChatId) {
+    if (!client?.sock || !session?.id || attendanceReminderTimers.has(session.id)) {
+        return;
+    }
+
+    const startsAt = parseWibDateTime(session.dateKey, session.startTime);
+    if (!startsAt) {
+        return;
+    }
+
+    const remindAt = startsAt.getTime() - ATTENDANCE_REMINDER_MINUTES * 60 * 1000;
+    const delay = remindAt - Date.now();
+    if (delay <= 0 || delay > 7 * 24 * 60 * 60 * 1000) {
+        return;
+    }
+
+    const timer = setTimeout(async () => {
+        attendanceReminderTimers.delete(session.id);
+        try {
+            const mentions = HADIR_LID.length ? HADIR_LID : ADMIN_LID;
+            const mentionText = mentions.map((lid) => `@${lid.split('@')[0]}`).join(' ');
+            await client.sock.sendMessage(targetChatId || session.chatId, {
+                text: `${mentionText ? mentionText + ' ' : ''}pengingat: sesi absen *${getSessionTitle(session)}* dijadwalkan mulai ${formatDateTimeLabel(session.dateKey, session.startTime)}. Ketik *buka absen* saat kegiatan dimulai.`,
+                mentions,
+            });
+        } catch (error) {
+            logInteraction('WARN', `attendance_reminder_failed | session=${session.id} | error=${error.message}`);
+        }
+    }, delay);
+
+    attendanceReminderTimers.set(session.id, timer);
+}
 function parseAttendanceReportCommand(rawBody) {
     const match = String(rawBody || '').trim().match(/^daftar\s+hadir(?:\s+(\d{4}-\d{2}-\d{2}))?$/i);
     if (!match) {
@@ -268,6 +756,7 @@ function parseAttendanceReportCommand(rawBody) {
 
     return {
         dateKey: match[1] || getWibDateKey(),
+        hasExplicitDate: Boolean(match[1]),
     };
 }
 
@@ -297,6 +786,14 @@ function parseDocumentationCommand(rawBody) {
     if (shareMatch) {
         return { type: 'share_folder', name: shareMatch[1].trim() };
     }
+    if (/^folder\s+list$/i.test(text)) {
+        return { type: 'list_folders' };
+    }
+
+    const removeFolderMatch = text.match(/^remove\s+folder\s+"([^"]+)"$/i);
+    if (removeFolderMatch) {
+        return { type: 'remove_folder', name: removeFolderMatch[1].trim() };
+    }
 
     return null;
 }
@@ -319,8 +816,30 @@ function isAdminUser(senderPhone, msg) {
 
 function isDocumentationAdmin(senderPhone, msg) {
     return isAdminUser(senderPhone, msg);
+
 }
 
+function hasLidRole(senderIdentity, ...lidLists) {
+    if (ADMIN_LID.includes(senderIdentity.lid)) return true;
+    return lidLists.some(list => list.includes(senderIdentity.lid));
+}
+
+function getUploadQueue(lid) {
+    return uploadQueue.get(lid) || null;
+}
+
+function clearUploadQueue(lid) {
+    const queue = uploadQueue.get(lid);
+    if (queue) {
+        if (queue.timeoutId) clearTimeout(queue.timeoutId);
+        if (queue.warningId) clearTimeout(queue.warningId);
+        uploadQueue.delete(lid);
+    }
+}
+
+function setUploadQueue(lid, data) {
+    uploadQueue.set(lid, data);
+}
 function isDocumentationUploadCommand(rawBody) {
     return /^upload\s+(dokumentasi|docs?)$/i.test(String(rawBody || '').trim());
 }
@@ -489,7 +1008,7 @@ function formatMemberInfo(member, index = null) {
 }
 
 function getLogoPaths() {
-    const assetsDir = path.join(__dirname, '..', 'assets');
+    const assetsDir = path.join(__dirname, '..', 'assets','logo');
     if (!fs.existsSync(assetsDir)) {
         return [];
     }
@@ -689,7 +1208,7 @@ function parseAdminCommands(rawBody) {
         }
 
         const removeMatch = segment.match(/^remove\s+(.+)$/i);
-        if (removeMatch) {
+        if (removeMatch && !/^folder\s+/i.test(removeMatch[1])) {
             actions.push({
                 type: 'remove',
                 name: removeMatch[1].replace(/^"|"$/g, '').trim(),
@@ -779,7 +1298,7 @@ function buildPemateriReminderText(recipientName, week) {
     return [
         `Halo ${recipientName},`,
         `ini pengingat bahwa kamu terjadwal sebagai pemateri Pertemuan ${week} di Code Flow Community.`,
-        'Mohon siapkan materi dan pantau grup untuk informasi lanjutan dari admin.',
+        'Mohon pelajari materi yg sudah dikirim dan pantau grup untuk informasi lanjutan dari admin.',
     ].join('\n');
 }
 
@@ -903,6 +1422,163 @@ function parseRegisterCommand(rawBody) {
     };
 }
 
+function completeRegistration(registerCommand, senderIdentity, senderPhone) {
+    if (!registerCommand) return { error: 'format daftar belum benar.' };
+    if (registerCommand.error) return { error: registerCommand.error };
+
+    const members = loadMembers();
+    const matchedIndexes = findMemberEntriesByIdentity(senderIdentity, { allowNameFallback: true });
+    if (matchedIndexes.length > 0) {
+        return { error: 'data kamu sudah terdaftar. Kalau mau koreksi data, gunakan command `add` atau cek dulu dengan `info`.' };
+    }
+
+    members.push({
+        phone: senderPhone,
+        ...(senderIdentity.lid && { lid: senderIdentity.lid }),
+        ...registerCommand.value,
+    });
+    saveMembers(members);
+    return { success: true };
+}
+
+function createScheduleFromData(data, chatId, senderName) {
+    if (!data.dateKey) return { error: 'tanggal jadwal belum ada.' };
+    if (!data.title) return { error: 'nama jadwal belum ada.' };
+    const startTime = data.startTime || '00:00';
+    const startsAt = parseWibDateTime(data.dateKey, startTime);
+    if (!startsAt) return { error: 'format tanggal/jam belum benar.' };
+    const session = createAttendanceSession(chatId, data.dateKey, startTime, data.title, senderName, data.endTime || null);
+    return { session };
+}
+
+async function handleConversationReply(msg, contact, senderName, senderIdentity, senderPhone, from, rawBody, client) {
+    const key = getConversationKey(senderIdentity, from);
+    const state = conversationStates.get(key);
+    if (!state) return false;
+
+    const text = String(rawBody || '').trim();
+    if (/^(batal|cancel)$/i.test(text)) {
+        conversationStates.delete(key);
+        await replyToUser(msg, contact, senderName, 'baik, proses dibatalkan.');
+        return true;
+    }
+
+    if (state.type === 'schedule') {
+        if (!hasLidRole(senderIdentity, HADIR_LID)) {
+            conversationStates.delete(key);
+            await replyToUser(msg, contact, senderName, 'command ini khusus admin hadir.');
+            return true;
+        }
+
+        if (state.step === 'date') {
+            const dateKey = normalizeDateInput(text);
+            if (!dateKey) {
+                await replyToUser(msg, contact, senderName, 'format tanggal belum benar. Contoh: `21-05-2026`.');
+                return true;
+            }
+            state.data.dateKey = dateKey;
+            state.step = 'time';
+            await replyToUser(msg, contact, senderName, 'oke. \napakah jam akses absen anggota \ndan\n jam close absen anggota mau. diisi sekarang? \nContoh: \n`jam absen 13.00` \n`jam close 17.00`\n\n atau kamu belum tau ? cukup ketik `belum`/`nanti`.');
+            return true;
+        }
+
+        if (state.step === 'time') {
+            if (isSkipValue(text)) {
+                state.step = 'title';
+                await replyToUser(msg, contact, senderName, 'baik, mohon berikan nama jadwal. Contoh: `pertemuan 3`.');
+                return true;
+            }
+            const startMatch = text.match(/^jam\s+absen\s*,?\s*(.+)$/i);
+            const range = parseTimeRange(startMatch ? startMatch[1] : text);
+            if (!range.startTime) {
+                await replyToUser(msg, contact, senderName, 'format jam belum benar. Contoh: `jam absen 13.00` atau `13.00-17.00`.');
+                return true;
+            }
+            state.data.startTime = range.startTime;
+            if (range.endTime) state.data.endTime = range.endTime;
+            state.step = 'closeTime';
+            await replyToUser(msg, contact, senderName, 'jam absen tersimpan. Mau isi jam close absen? Contoh `close absen,17.00` atau ketik `belum`.');
+            return true;
+        }
+
+        if (state.step === 'closeTime') {
+            if (!isSkipValue(text)) {
+                const closeMatch = text.match(/^close\s+absen\s*,?\s*(.+)$/i);
+                const closeTime = normalizeTimeInput(closeMatch ? closeMatch[1] : text);
+                if (!closeTime) {
+                    await replyToUser(msg, contact, senderName, 'format jam close belum benar. Contoh: `close absen,17.00` atau ketik `belum`.');
+                    return true;
+                }
+                state.data.endTime = closeTime;
+            }
+            state.step = 'title';
+            await replyToUser(msg, contact, senderName, 'baik, mohon berikan nama jadwal. Contoh: `pertemuan 3`.');
+            return true;
+        }
+
+        if (state.step === 'title') {
+            if (!text || isSkipValue(text)) {
+                await replyToUser(msg, contact, senderName, 'nama jadwal wajib diisi. Contoh: `pertemuan 3`.');
+                return true;
+            }
+            state.data.title = text;
+            const result = createScheduleFromData(state.data, from, senderName);
+            conversationStates.delete(key);
+            if (result.error) {
+                await replyToUser(msg, contact, senderName, result.error);
+                return true;
+            }
+            scheduleAttendanceReminder(client, result.session, from);
+            await replyToUser(msg, contact, senderName, `jadwal *${getSessionTitle(result.session)}* terbuat. Silakan lihat jadwal dengan *liat jadwal*.`);
+            return true;
+        }
+    }
+
+    if (state.type === 'register') {
+        if (state.step === 'askMode') {
+            if (/^(lanjut|satu|satu satu|ya|y)$/i.test(text)) {
+                state.step = 'name';
+                await replyToUser(msg, contact, senderName, 'baik, tulis nama lengkap kamu.');
+                return true;
+            }
+            const parsed = parseRegisterText(`daftar ${text}`);
+            if (parsed) {
+                const result = completeRegistration(parsed, senderIdentity, senderPhone);
+                conversationStates.delete(key);
+                await replyToUser(msg, contact, senderName, result.error || 'pendaftaran berhasil disimpan. Sekarang kamu bisa ketik `info` untuk melihat data akunmu.');
+                return true;
+            }
+            await replyToUser(msg, contact, senderName, 'ketik `lanjut` untuk daftar satu-satu, atau kirim format lengkap dengan koma.');
+            return true;
+        }
+        const steps = ['name', 'npm', 'studyProgram', 'suggestion'];
+        if (steps.includes(state.step)) {
+            state.data[state.step] = text;
+            if (state.step === 'name') {
+                state.step = 'npm';
+                await replyToUser(msg, contact, senderName, 'tulis NPM kamu. Kalau belum ada, ketik `belum`.');
+                return true;
+            }
+            if (state.step === 'npm') {
+                state.step = 'studyProgram';
+                await replyToUser(msg, contact, senderName, 'tulis prodi kamu.');
+                return true;
+            }
+            if (state.step === 'studyProgram') {
+                state.step = 'suggestion';
+                await replyToUser(msg, contact, senderName, 'tulis saran/harapan kamu untuk komunitas. Kalau tidak ada, ketik `-`.');
+                return true;
+            }
+            const parsed = buildRegisterCommand({ ...state.data, role: 'Anggota', managementRole: '-' });
+            const result = completeRegistration(parsed, senderIdentity, senderPhone);
+            conversationStates.delete(key);
+            await replyToUser(msg, contact, senderName, result.error || 'pendaftaran berhasil disimpan. Sekarang kamu bisa ketik `info` untuk melihat data akunmu.');
+            return true;
+        }
+    }
+
+    return false;
+}
 async function handleMessage(msg, client) {
     const rawBody = msg.body.replace(/@\d+/g, '').replace(/^@bot\s+/i, '').trim();
     const body = rawBody.toLowerCase();
@@ -920,12 +1596,13 @@ async function handleMessage(msg, client) {
     const senderIdentity = buildSenderIdentity(contact, msg, senderName);
     const senderPhone = senderIdentity.phone;
     const addCommand = parseAddCommand(rawBody);
-    const registerCommand = parseRegisterCommand(rawBody);
+    const registerCommand = parseRegisterText(rawBody);
     const adminCommands = parseAdminCommands(rawBody);
     const attendanceReportCommand = parseAttendanceReportCommand(rawBody);
+    const attendanceCommand = parseAttendanceCommand(rawBody);
     const documentationCommand = parseDocumentationCommand(rawBody);
     const documentationUploadCommand = isDocumentationUploadCommand(rawBody);
-    const primaryCommand = addCommand ? 'add' : registerCommand ? 'daftar' : attendanceReportCommand ? 'daftar hadir' : documentationCommand ? 'documentation' : body;
+    const primaryCommand = addCommand ? 'add' : registerCommand ? 'daftar' : attendanceReportCommand ? 'daftar hadir' : attendanceCommand ? attendanceCommand.primary : documentationCommand ? 'documentation' : body;
 
     let chat = null;
     let chatType = 'PRIVATE';
@@ -939,10 +1616,80 @@ async function handleMessage(msg, client) {
         logInteraction('WARN', `chat=${from} | reason=getChat_failed | error="${error.message}"`);
     }
 
-    const shouldLogCommand = primaryCommand === 'documentation' || AVAILABLE_COMMANDS.has(primaryCommand) || Boolean(adminCommands) || documentationUploadCommand;
+    if (await handleConversationReply(msg, contact, senderName, senderIdentity, senderPhone, from, rawBody, client)) {
+        return;
+    }
+
+    // Handle media masuk dari admin dokumentasi (chat pribadi)
+    if (!isGroup && msg.mediaInfo && typeof msg.downloadMedia === 'function') {
+        if (hasLidRole(senderIdentity, DOKUMENTASI_LID)) {
+            const mediaType = getMediaType(msg.mediaInfo.mimetype, msg.mediaInfo.fileName);
+            if (mediaType) {
+                const lid = senderIdentity.lid;
+                if (!getUploadQueue(lid)) {
+                    uploadQueue.set(lid, { items: [], warningId: null, timeoutId: null, debounceId: null, sock: null });
+                }
+                const existing = getUploadQueue(lid);
+                const downloaded = await msg.downloadMedia().catch(() => null);
+                if (downloaded?.buffer) {
+                    existing.items.push({
+                        buffer: downloaded.buffer,
+                        mimetype: downloaded.mimetype,
+                        fileName: downloaded.fileName || msg.mediaInfo.fileName,
+                        type: mediaType,
+                    });
+                    await client.sock.sendMessage(from, { text: `⏳ File diterima (${existing.items.length}). Menunggu file berikutnya...` });
+                    // Reset timer setiap ada file baru masuk
+                    if (existing.warningId) clearTimeout(existing.warningId);
+                    if (existing.timeoutId) clearTimeout(existing.timeoutId);
+
+                    // Warning menit ke-4
+                    existing.warningId = setTimeout(async () => {
+                        const q = getUploadQueue(lid);
+                        if (!q) return;
+                        const foto = q.items.filter(i => i.type === 'foto').length;
+                        const video = q.items.filter(i => i.type === 'video').length;
+                        await client.sock.sendMessage(from, {
+                            text: `⚠️ Sesi upload hampir habis (1 menit lagi)!\nTertampung: ${foto} foto, ${video} video.\nSegera balas: *ya*, *upload foto*, atau *upload video*`
+                        });
+                    }, UPLOAD_WARNING_MS);
+
+                    // Timeout 5 menit → hapus antrian
+                    existing.timeoutId = setTimeout(async () => {
+                        const q = getUploadQueue(lid);
+                        if (!q) return;
+                        clearUploadQueue(lid);
+                        await client.sock.sendMessage(from, {
+                            text: `❌ Sesi upload habis. File yang tertampung telah dihapus dari memory. Silakan kirim ulang.`
+                        });
+                    }, UPLOAD_TIMEOUT_MS);
+
+
+                    // Balas konfirmasi setelah jeda singkat (debounce 2 detik)
+                    if (existing.debounceId) clearTimeout(existing.debounceId);
+                    existing.debounceId = setTimeout(async () => {
+                        const q = getUploadQueue(lid);
+                        console.log(`[debounce] fired | queue:`, q ? `${q.items.length} items` : 'null');
+                        if (!q) return;
+                        const foto = q.items.filter(i => i.type === 'foto').length;
+                        const video = q.items.filter(i => i.type === 'video').length;
+                        await client.sock.sendMessage(from, {
+                            text: `📥 Saya menerima *${foto} foto* dan *${video} video* — total *${foto + video} item*.\n\nBalas dengan:\n- *ya* → upload semua\n- *upload foto* → upload foto saja\n- *upload video* → upload video saja\n- *reset* → batalkan semua file\n\nSesi akan habis dalam *1 menit*.`
+                        });
+                    }, 5000);
+
+                }
+                return;
+            }
+        }
+    }
+
+
+
+    const shouldLogCommand = primaryCommand === 'documentation' || AVAILABLE_COMMANDS.has(primaryCommand) || Boolean(adminCommands) || documentationUploadCommand || Boolean(attendanceCommand);
     logInteraction('INCOMING', `${chatType} | chat=${from} | phone=${senderIdentity.phone || '-'} | lid=${senderIdentity.lid || '-'} | messageLength=${String(msg.body || '').length}${shouldLogCommand ? ` | command=${primaryCommand || '-'}` : ''}`);
 
-    if (isAdminUser(senderPhone, msg) && adminCommands) {
+    if (hasLidRole(senderIdentity, KOMUNIKASI_LID, PEMATERI_LID) && adminCommands) {
         const quotedMessage = msg.hasQuotedMsg ? await msg.getQuotedMessage().catch(() => null) : null;
         const explicitWeeks = adminCommands
             .map((action) => action.week)
@@ -951,6 +1698,17 @@ async function handleMessage(msg, client) {
         const scheduleCache = new Map();
 
         for (const action of adminCommands) {
+            // remove, move, add_schedule = hanya PEMATERI_LID atau ADMIN_LID
+            if (['remove', 'move', 'add_schedule'].includes(action.type) && !hasLidRole(senderIdentity, PEMATERI_LID)) {
+                await replyToUser(msg, contact, senderName, 'command ini khusus admin pemateri.');
+                return;
+            }
+
+            // mention, forward, remind = hanya KOMUNIKASI_LID atau ADMIN_LID
+            if (['mention', 'forward', 'remind'].includes(action.type) && !hasLidRole(senderIdentity, KOMUNIKASI_LID)) {
+                await replyToUser(msg, contact, senderName, 'command ini khusus admin komunikasi.');
+                return;
+            }
             if (action.type === 'remove') {
                 const removed = pemateriData.removeSpeakerByName(action.name);
                 if (!removed) {
@@ -1078,18 +1836,31 @@ async function handleMessage(msg, client) {
 
     if (adminCommands) {
         logInteraction('OUTGOING', `reply=admin_only_command_blocked | to=${senderName}`);
-        await replyToUser(msg, contact, senderName, 'command ini khusus admin dan tidak bisa digunakan oleh anggota lain.');
+        await replyToUser(msg, contact, senderName, 'command ini khusus admin tidak bisa digunakan.');
         return;
     }
 
-    if (msg.mediaInfo && typeof msg.downloadMedia === 'function' && documentationUploadCommand) {
-        if (!isDocumentationAdmin(senderPhone, msg)) {
-            logInteraction('SKIP', `DOCUMENTATION_UPLOAD | from=${senderName} | reason=not_admin`);
+    if (documentationUploadCommand) {
+        if (!hasLidRole(senderIdentity, DOKUMENTASI_LID)) {
+            logInteraction('SKIP', `DOCUMENTATION_UPLOAD | from=${senderName} | reason=not_dokumentasi`);
+            return;
+        }
+
+        // Ambil media dari quoted message (pesan yang di-reply)
+        const quotedMsg = msg.hasQuotedMsg ? await msg.getQuotedMessage().catch(() => null) : null;
+        const mediaSource = (quotedMsg?.mediaInfo && typeof quotedMsg.downloadMedia === 'function')
+            ? quotedMsg
+            : (msg.mediaInfo && typeof msg.downloadMedia === 'function')
+                ? msg
+                : null;
+
+        if (!mediaSource) {
+            await replyToUser(msg, contact, senderName, 'tidak ada file yang terdeteksi. Reply ke file/foto/video lalu ketik upload dokumentasi.');
             return;
         }
 
         try {
-            const media = await msg.downloadMedia();
+            const media = await mediaSource.downloadMedia();
             if (!media?.buffer) {
                 await replyToUser(msg, contact, senderName, 'dokumen gagal dibaca dari WhatsApp. Coba kirim ulang sebagai document.');
                 return;
@@ -1109,7 +1880,7 @@ async function handleMessage(msg, client) {
     if (isGroup) {
         const botNumber = client.info.wid._serialized;
         const isMentioned = msg.mentionedIds?.includes(botNumber);
-        const isKnownCommand = AVAILABLE_COMMANDS.has(primaryCommand) || primaryCommand === 'documentation' || documentationUploadCommand || Boolean(adminCommands);
+        const isKnownCommand = AVAILABLE_COMMANDS.has(primaryCommand) || primaryCommand === 'documentation' || documentationUploadCommand || Boolean(adminCommands) || Boolean(attendanceCommand);
         if (!isMentioned && !isKnownCommand) {
             logInteraction('SKIP', `GROUP | from=${senderName} | reason=not_mentioned_and_unknown_command`);
             return;
@@ -1118,9 +1889,9 @@ async function handleMessage(msg, client) {
 
     switch (primaryCommand) {
         case 'documentation': {
-            if (!isDocumentationAdmin(senderPhone, msg)) {
+            if (!hasLidRole(senderIdentity, DOKUMENTASI_LID)) {
                 logInteraction('OUTGOING', `reply=documentation_admin_only | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, 'fitur dokumentasi khusus admin/pengurus yang diberi akses.');
+                await replyToUser(msg, contact, senderName, 'fitur dokumentasi khusus admin dokumentasi.');
                 break;
             }
 
@@ -1148,7 +1919,7 @@ async function handleMessage(msg, client) {
                 }
 
                 if (documentationCommand.type === 'set_active_folder') {
-                    const folder = driveDocs.setActiveFolder(from, documentationCommand.name);
+                    const folder = await driveDocs.setActiveFolder(from, documentationCommand.name);
                     logInteraction('OUTGOING', `reply=documentation_active_folder | to=${senderName} | folder=${folder.name}`);
                     await replyToUser(msg, contact, senderName, `folder aktif sekarang: *${folder.name}*. Kirim dokumentasi sebagai document agar langsung diupload ke folder ini.`);
                     break;
@@ -1166,48 +1937,339 @@ async function handleMessage(msg, client) {
                 break;
             }
 
+            if (documentationCommand.type === 'list_folders') {
+                const folders = await listFoldersFromDrive();
+
+                if (folders.length === 0) {
+                    await replyToUser(msg, contact, senderName, 'belum ada folder di Google Drive.');
+                    break;
+                }
+
+                const lines = folders.map((folder, index) =>
+                    `${index + 1}. *${folder.name}*\n` +
+                    `${folder.photos} foto · ${folder.videos} video · ${folder.total} item\n` +
+                    `${folder.webViewLink}`
+                );
+
+                logInteraction('OUTGOING', `reply=list_folders | to=${senderName} | count=${folders.length}`);
+                await replyToUser(msg, contact, senderName, `*Daftar Folder Dokumentasi:*\n\n${lines.join('\n\n')}`);
+                break;
+            }
+            if (documentationCommand.type === 'remove_folder') {
+                const removed = await removeFolder(documentationCommand.name);
+                logInteraction('OUTGOING', `reply=remove_folder | to=${senderName} | folder=${removed.name}`);
+                await replyToUser(msg, contact, senderName, `folder *${removed.name}* berhasil dihapus dari Google Drive.`);
+                break;
+            }
             break;
         }
 
+        case 'buat jadwal':
+        case 'jadwal absen': {
+            if (!hasLidRole(senderIdentity, HADIR_LID)) {
+                await replyToUser(msg, contact, senderName, 'command ini khusus admin hadir.');
+                break;
+            }
+
+            if (attendanceCommand.type === 'schedule_prompt') {
+                conversationStates.set(getConversationKey(senderIdentity, from), { type: 'schedule', step: 'date', data: {} });
+                await replyToUser(msg, contact, senderName, 'untuk tanggal berapa? Contoh: `21-05-2026`.');
+                break;
+            }
+
+            const result = createScheduleFromData(attendanceCommand, from, senderName);
+            if (result.error) {
+                await replyToUser(msg, contact, senderName, 'format jadwal belum benar. Contoh lengkap: `buat jadwal,21-05-2026,13.00-17.00,pertemuan ketiga`.');
+                break;
+            }
+
+            scheduleAttendanceReminder(client, result.session, from);
+            const closeText = result.session.endTime ? ` sampai ${result.session.endTime.replace(':', '.')} WIB` : '';
+            await replyToUser(msg, contact, senderName, `jadwal *${getSessionTitle(result.session)}* terbuat untuk ${formatDateKey(result.session.dateKey)} pukul ${result.session.startTime.replace(':', '.')} WIB${closeText}. Lihat semua jadwal dengan *liat jadwal*.`);
+            break;
+        }
+
+        case 'liat jadwal': {
+            if (!hasLidRole(senderIdentity, HADIR_LID)) {
+                await replyToUser(msg, contact, senderName, 'command ini khusus admin hadir.');
+                break;
+            }
+            await replyToUser(msg, contact, senderName, formatScheduleList());
+            break;
+        }
+
+        case 'hapus jadwal': {
+            if (!hasLidRole(senderIdentity, HADIR_LID)) {
+                await replyToUser(msg, contact, senderName, 'command ini khusus admin hadir.');
+                break;
+            }
+            const attendance = loadAttendance();
+            const { sessions, activeByChat } = getAttendanceMeta(attendance);
+            const session = findScheduleByQuery(attendanceCommand.query, from);
+            if (!session) {
+                await replyToUser(msg, contact, senderName, 'jadwal tidak ditemukan. Pakai nomor dari `liat jadwal`, tanggal, atau nama jadwal.');
+                break;
+            }
+            delete sessions[session.id];
+            for (const [scope, sessionId] of Object.entries(activeByChat)) {
+                if (sessionId === session.id) delete activeByChat[scope];
+            }
+            saveAttendance(attendance);
+            await replyToUser(msg, contact, senderName, `jadwal *${getSessionTitle(session)}* sudah dihapus.`);
+            break;
+        }
+
+        case 'ubah jadwal': {
+            if (!hasLidRole(senderIdentity, HADIR_LID)) {
+                await replyToUser(msg, contact, senderName, 'command ini khusus admin hadir.');
+                break;
+            }
+            const session = findScheduleByQuery(attendanceCommand.query, from);
+            if (!session) {
+                await replyToUser(msg, contact, senderName, 'jadwal tidak ditemukan. Contoh: `ubah jadwal,1,nama,pertemuan 4`.');
+                break;
+            }
+            const field = attendanceCommand.field;
+            const value = attendanceCommand.value;
+            if (['tanggal', 'date'].includes(field)) {
+                const dateKey = normalizeDateInput(value);
+                if (!dateKey) {
+                    await replyToUser(msg, contact, senderName, 'format tanggal belum benar. Contoh: `ubah jadwal,1,tanggal,21-05-2026`.');
+                    break;
+                }
+                session.dateKey = dateKey;
+            } else if (['jam', 'jam absen', 'absen', 'mulai'].includes(field)) {
+                const startTime = normalizeTimeInput(value);
+                if (!startTime) {
+                    await replyToUser(msg, contact, senderName, 'format jam belum benar. Contoh: `ubah jadwal,1,jam,13.00`.');
+                    break;
+                }
+                session.startTime = startTime;
+            } else if (['close', 'close absen', 'tutup'].includes(field)) {
+                if (isSkipValue(value)) delete session.endTime;
+                else {
+                    const endTime = normalizeTimeInput(value);
+                    if (!endTime) {
+                        await replyToUser(msg, contact, senderName, 'format close absen belum benar. Contoh: `ubah jadwal,1,close,17.00`.');
+                        break;
+                    }
+                    session.endTime = endTime;
+                }
+            } else if (['nama', 'judul', 'pertemuan'].includes(field)) {
+                session.title = value;
+            } else {
+                await replyToUser(msg, contact, senderName, 'field yang bisa diubah: `tanggal`, `jam`, `close`, `nama`.');
+                break;
+            }
+            saveAttendanceSession(session);
+            await replyToUser(msg, contact, senderName, `jadwal diperbarui:\n${formatScheduleList()}`);
+            break;
+        }
+
+        case 'jam absen':
+        case 'close absen': {
+            if (!hasLidRole(senderIdentity, HADIR_LID)) {
+                await replyToUser(msg, contact, senderName, 'command ini khusus admin hadir.');
+                break;
+            }
+            const attendance = loadAttendance();
+            const session = findOpenSessionForChat(attendance, from) || findRelevantSessionForExcuse(attendance, from);
+            if (!session) {
+                await replyToUser(msg, contact, senderName, 'belum ada jadwal yang bisa diubah. Buat dulu dengan `buat jadwal`.');
+                break;
+            }
+            const timeValue = normalizeTimeInput(attendanceCommand.value);
+            if (!timeValue) {
+                await replyToUser(msg, contact, senderName, `format jam belum benar. Contoh: \`${primaryCommand},17.00\`.`);
+                break;
+            }
+            if (primaryCommand === 'jam absen') session.startTime = timeValue;
+            else session.endTime = timeValue;
+            saveAttendanceSession(session);
+            await replyToUser(msg, contact, senderName, `jadwal *${getSessionTitle(session)}* diperbarui.\n${formatScheduleList()}`);
+            break;
+        }
+        case 'buka absen': {
+            if (!hasLidRole(senderIdentity, HADIR_LID)) {
+                await replyToUser(msg, contact, senderName, 'command ini khusus admin hadir.');
+                break;
+            }
+
+            const session = openAttendanceSession(from, attendanceCommand.title);
+            const closeText = session.endTime ? ` sebelum pukul ${session.endTime.replace(':', '.')} WIB` : ' sebelum absen ditutup';
+            await sendBotNotice(client, `*Absen Dibuka*\n\nAbsen untuk jadwal *${getSessionTitle(session)}* telah dibuka. Silakan ketik *hadir* di grup${closeText}.`);
+            await replyToUser(msg, contact, senderName, `sesi absen *${getSessionTitle(session)}* sudah dibuka. Anggota hanya bisa absen dari grup dengan command *hadir*.`);
+            break;
+        }
+
+        case 'tutup absen': {
+            if (!hasLidRole(senderIdentity, HADIR_LID)) {
+                await replyToUser(msg, contact, senderName, 'command ini khusus admin hadir.');
+                break;
+            }
+
+            const session = closeAttendanceSession(from);
+            if (!session) {
+                await replyToUser(msg, contact, senderName, 'tidak ada sesi absen yang sedang dibuka.');
+                break;
+            }
+
+            await sendBotNotice(client, `*Absen Ditutup*\n\nAbsen untuk jadwal *${getSessionTitle(session)}* telah ditutup. Terima kasih.`);
+            await replyToUser(msg, contact, senderName, `sesi absen *${getSessionTitle(session)}* ditutup.\n\n${formatAttendanceSessionReport(session)}`);
+            break;
+        }
+
+        case 'hapus hadir': {
+            if (!hasLidRole(senderIdentity, HADIR_LID)) {
+                await replyToUser(msg, contact, senderName, 'command ini khusus admin hadir.');
+                break;
+            }
+
+            const result = removeAttendanceFromSession(from, attendanceCommand.query);
+            if (result.status === 'no_session') {
+                await replyToUser(msg, contact, senderName, 'belum ada sesi absen aktif/terjadwal untuk dikoreksi.');
+                break;
+            }
+            if (result.status === 'not_found') {
+                await replyToUser(msg, contact, senderName, `nama/npm/lid *${attendanceCommand.query}* tidak ditemukan di daftar hadir sesi *${getSessionTitle(result.session)}*.`);
+                break;
+            }
+
+            await replyToUser(msg, contact, senderName, `*${result.removed.name}* dihapus dari daftar hadir sesi *${getSessionTitle(result.session)}*.`);
+            break;
+        }
+
+        case 'izin': {
+            const matchedMembers = findMembersByIdentity(senderIdentity, { allowNameFallback: true });
+            if (matchedMembers.length === 0) {
+                await replyToUser(msg, contact, senderName, 'data kamu belum terdaftar, jadi izin belum bisa dicatat. Hubungi pengurus/admin hadir.');
+                break;
+            }
+            if (matchedMembers.length > 1) {
+                await replyToUser(msg, contact, senderName, 'data kamu terdeteksi lebih dari satu profil. Hubungi admin agar data dirapikan dulu.');
+                break;
+            }
+
+            const attendance = loadAttendance();
+            const session = findRelevantSessionForExcuse(attendance, from);
+            if (!session) {
+                await replyToUser(msg, contact, senderName, 'belum ada jadwal/sesi absen yang bisa menerima izin. Tunggu admin hadir menjadwalkan pertemuan dulu.');
+                break;
+            }
+
+            const proof = msg.mediaInfo ? {
+                hasMedia: true,
+                type: msg.mediaInfo.type,
+                fileName: msg.mediaInfo.fileName,
+                mimetype: msg.mediaInfo.mimetype,
+            } : null;
+            const result = recordExcuseInSession(session.id, matchedMembers[0], senderIdentity, attendanceCommand.reason, proof);
+            await replyToUser(msg, contact, senderName, `izin kamu untuk *${getSessionTitle(result.session)}* sudah ${result.status === 'updated' ? 'diperbarui' : 'dicatat'}. Alasan: ${result.record.reason}${proof ? '\nBukti media terdeteksi.' : ''}`);
+            break;
+        }
+
+        case 'daftar izin': {
+            if (!hasLidRole(senderIdentity, HADIR_LID)) {
+                await replyToUser(msg, contact, senderName, 'rekap izin hanya bisa dilihat oleh admin hadir.');
+                break;
+            }
+
+            const attendance = loadAttendance();
+            const { sessions } = getAttendanceMeta(attendance);
+            const matchedSessions = Object.values(sessions).filter((session) => session.dateKey === attendanceCommand.dateKey);
+            if (matchedSessions.length === 0) {
+                await replyToUser(msg, contact, senderName, `belum ada sesi izin pada ${formatDateKey(attendanceCommand.dateKey)}.`);
+                break;
+            }
+
+            const lines = matchedSessions.map((session) => {
+                const excuses = getSessionExcuses(session);
+                const detail = excuses.length
+                    ? excuses.map((record, index) => `${index + 1}. ${record.name || '-'} - ${record.reason || '-'}${record.proof ? ' (ada bukti)' : ''}`).join('\n')
+                    : 'Belum ada izin.';
+                return `*${getSessionTitle(session)}*\n${detail}`;
+            });
+            await replyToUser(msg, contact, senderName, `*Daftar Izin - ${formatDateKey(attendanceCommand.dateKey)}*\n\n${lines.join('\n\n')}`);
+            break;
+        }
         case 'menu':
             logInteraction('OUTGOING', `reply=menu | to=${senderName}`);
             await replyToUser(msg, contact, senderName, MENU_TEXT);
             break;
 
         case 'hadir': {
+            if (!isGroup) {
+                await replyToUser(msg, contact, senderName, 'absen hadir hanya bisa dilakukan di grup saat sesi absen dibuka oleh admin hadir.');
+                break;
+            }
+
+            const attendance = loadAttendance();
+            const session = findOpenSessionForChat(attendance, from);
+            if (!session) {
+                await replyToUser(msg, contact, senderName, 'sesi absen belum dibuka. Tunggu admin hadir membuka sesi dengan command *buka absen*.');
+                break;
+            }
+
+            const nowMs = Date.now();
+            const opensAt = parseWibDateTime(session.dateKey, session.startTime);
+            const closesAt = session.endTime ? parseWibDateTime(session.dateKey, session.endTime) : null;
+            if (opensAt && nowMs < opensAt.getTime()) {
+                await replyToUser(msg, contact, senderName, `akses absen untuk *${getSessionTitle(session)}* belum dimulai. Mulai pukul ${session.startTime.replace(':', '.')} WIB.`);
+                break;
+            }
+            if (closesAt && nowMs > closesAt.getTime()) {
+                closeAttendanceSession(from);
+                await replyToUser(msg, contact, senderName, `akses absen untuk *${getSessionTitle(session)}* sudah ditutup pukul ${session.endTime.replace(':', '.')} WIB.`);
+                break;
+            }
+
             const matchedMembers = findMembersByIdentity(senderIdentity, { allowNameFallback: true });
             if (matchedMembers.length === 0) {
-                logInteraction('OUTGOING', 'reply=attendance_not_registered | to=' + senderName + ' | phone=' + (senderIdentity.phone || '-') + ' | lid=' + (senderIdentity.lid || '-') + ' | names=' + (senderIdentity.names.join('|') || '-'));
-                await replyToUser(msg, contact, senderName, 'data kamu belum terdaftar, jadi kehadiran belum bisa dicatat. Silakan daftar dulu dengan format:\n' + REGISTER_TEMPLATE);
+                logInteraction('OUTGOING', 'reply=attendance_not_registered | to=' + senderName + ' | lid=' + (senderIdentity.lid || '-') + ' | names=' + (senderIdentity.names.join('|') || '-'));
+                await replyToUser(msg, contact, senderName, 'data kamu belum terdaftar, jadi kehadiran belum bisa dicatat. Hubungi pengurus/admin hadir.');
                 break;
             }
 
             if (matchedMembers.length > 1) {
-                logInteraction('OUTGOING', 'reply=attendance_duplicate_phone | to=' + senderName);
-                await replyToUser(msg, contact, senderName, 'nomor kamu terhubung ke lebih dari satu profil. Hubungi admin dulu supaya data bisa dirapikan sebelum absen.');
+                await replyToUser(msg, contact, senderName, 'data kamu terdeteksi lebih dari satu profil. Hubungi admin agar data dirapikan dulu.');
                 break;
             }
 
-            const attendanceResult = recordAttendance(matchedMembers[0], senderIdentity);
+            const attendanceResult = recordAttendanceInSession(session.id, matchedMembers[0], senderIdentity);
             if (attendanceResult.status === 'exists') {
-                logInteraction('OUTGOING', 'reply=attendance_exists | to=' + senderName + ' | date=' + attendanceResult.dateKey);
-                await replyToUser(msg, contact, senderName, 'kehadiran kamu hari ini sudah tercatat pada ' + (attendanceResult.record.time || '-') + ' WIB.');
+                await replyToUser(msg, contact, senderName, 'kehadiran kamu sudah tercatat pada ' + (attendanceResult.record.time || '-') + ' WIB untuk sesi *' + getSessionTitle(session) + '*.');
                 break;
             }
 
-            logInteraction('OUTGOING', 'reply=attendance_saved | to=' + senderName + ' | date=' + attendanceResult.dateKey);
-            await replyToUser(msg, contact, senderName, 'kehadiran berhasil dicatat untuk ' + formatDateKey(attendanceResult.dateKey) + ' pukul ' + attendanceResult.record.time + ' WIB.');
+            await replyToUser(msg, contact, senderName, 'kehadiran berhasil dicatat untuk sesi *' + getSessionTitle(session) + '* pukul ' + attendanceResult.record.time + ' WIB.');
             break;
         }
 
         case 'daftar hadir': {
-            if (!isAdminUser(senderPhone, msg)) {
+            if (!hasLidRole(senderIdentity, HADIR_LID)) {
                 logInteraction('OUTGOING', 'reply=attendance_report_admin_only | to=' + senderName);
-                await replyToUser(msg, contact, senderName, 'rekap daftar hadir hanya bisa dilihat oleh admin.');
+                await replyToUser(msg, contact, senderName, 'rekap daftar hadir hanya bisa dilihat oleh admin hadir.');
                 break;
             }
 
-            logInteraction('OUTGOING', 'reply=attendance_report | to=' + senderName + ' | date=' + attendanceReportCommand.dateKey);
+            const attendance = loadAttendance();
+            const { sessions } = getAttendanceMeta(attendance);
+
+            if (!attendanceReportCommand.hasExplicitDate) {
+                const activeSession = findOpenSessionForChat(attendance, from);
+                if (activeSession) {
+                    await replyToUser(msg, contact, senderName, formatAttendanceSessionReport(activeSession));
+                    break;
+                }
+            }
+
+            const matchedSessions = Object.values(sessions).filter((session) => session.dateKey === attendanceReportCommand.dateKey);
+            if (matchedSessions.length > 0) {
+                await replyToUser(msg, contact, senderName, matchedSessions.map(formatAttendanceSessionReport).join('\n\n'));
+                break;
+            }
+
+            logInteraction('OUTGOING', 'reply=attendance_report_legacy | to=' + senderName + ' | date=' + attendanceReportCommand.dateKey);
             await replyToUser(msg, contact, senderName, formatAttendanceReport(attendanceReportCommand.dateKey));
             break;
         }
@@ -1240,38 +2302,23 @@ async function handleMessage(msg, client) {
 
         case 'daftar': {
             if (!registerCommand) {
-                logInteraction('OUTGOING', `reply=register_format_info | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, `format daftar belum benar. Gunakan:\n\`${REGISTER_TEMPLATE}\``);
+                conversationStates.set(getConversationKey(senderIdentity, from), { type: 'register', step: 'askMode', data: {} });
+                logInteraction('OUTGOING', `reply=register_prompt | to=${senderName}`);
+                await replyToUser(msg, contact, senderName, 'kamu bisa daftar sekali ketik dengan format:\n\n```\ndaftar\nnama [namaKamu],\nnpm [npmKamu],\nprodi [prodiKamu],\nsaran [saranKamu]\n```\n\nAtau lanjut satu-satu, ketik:\n`lanjut`\n\nnanti saya arahkan😊.');
                 break;
             }
 
-            if (registerCommand.error) {
+            const result = completeRegistration(registerCommand, senderIdentity, senderPhone);
+            if (result.error) {
                 logInteraction('OUTGOING', `reply=register_error | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, registerCommand.error);
+                await replyToUser(msg, contact, senderName, result.error);
                 break;
             }
 
-            const members = loadMembers();
-            const matchedIndexes = findMemberEntriesByIdentity(senderIdentity, { allowNameFallback: true });
-
-            if (matchedIndexes.length > 0) {
-                logInteraction('OUTGOING', `reply=register_exists | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, 'nomor kamu sudah terdaftar. Kalau mau koreksi data, gunakan command `add` atau cek dulu dengan `info`.');
-                break;
-            }
-
-            members.push({
-                phone: senderPhone,
-                ...(senderIdentity.lid && { lid: senderIdentity.lid }),
-                ...registerCommand.value,
-            });
-
-            saveMembers(members);
             logInteraction('OUTGOING', `reply=register_success | to=${senderName}`);
             await replyToUser(msg, contact, senderName, 'pendaftaran berhasil disimpan. Sekarang kamu bisa ketik `info` untuk melihat data akunmu.');
             break;
         }
-
         case 'pemateri':
             logInteraction('OUTGOING', `reply=pemateri | to=${senderName}`);
             await replyToUser(msg, contact, senderName, `berikut susunan pemateri kegiatan rutin:\n\n${formatPemateriSchedule()}`);
@@ -1406,11 +2453,10 @@ async function handleMessage(msg, client) {
             break;
         }
         case 'upin ipin': {
-            // Nomor bot Bridges (Ipin) — ganti dengan nomor aslinya
-            const ipinNumber = '6283166111757@s.whatsapp.net'; // ← ganti ini
+            const ipinNumber = '6283166111757@s.whatsapp.net';
 
             await client.sock.sendMessage(msg.key.remoteJid, {
-                text: `Halo saya Upin! 🌙\n@${ipinNumber.split('@')[0]}`,
+                text: `Halo saye upin dan ini adik saye ipin! 🌙\n@${ipinNumber.split('@')[0]}`,
                 mentions: [ipinNumber]
             });
             break;
@@ -1459,6 +2505,85 @@ async function handleMessage(msg, client) {
 
             break;
         }
+        case 'min ukm di um apa aja ni?': {
+            logInteraction('OUTGOING', `reply=ukm | to=${senderName}`);
+            await replyToUser(msg, contact, senderName,
+                `UKM di UM? Ini dia:\n\n` +
+                `MAPALA\n` +
+                `MENWA\n` +
+                `PENCAK SILAT\n` +
+                `SANGGAR SENI\n` +
+                `DKV\n` +
+                `PRAMUKA\n` +
+                `ROHIS`
+            );
+            break;
+        }
+        case 'reset': {
+            if (isGroup) break;
+            if (!hasLidRole(senderIdentity, DOKUMENTASI_LID)) break;
+
+            const lid = senderIdentity.lid;
+            const queue = getUploadQueue(lid);
+
+            if (!queue || queue.items.length === 0) {
+                await client.sock.sendMessage(from, { text: '⚠️ Tidak ada sesi upload yang aktif.' });
+                break;
+            }
+
+            const foto = queue.items.filter(i => i.type === 'foto').length;
+            const video = queue.items.filter(i => i.type === 'video').length;
+            clearUploadQueue(lid);
+            await client.sock.sendMessage(from, { text: `🗑️ Sesi dibatalkan. ${foto} foto dan ${video} video telah dihapus dari memory.` });
+            break;
+        }
+
+
+
+        case 'ya':
+        case 'upload foto':
+        case 'upload video': {
+            if (isGroup) break;
+            if (!hasLidRole(senderIdentity, DOKUMENTASI_LID)) break;
+
+            const lid = senderIdentity.lid;
+            const queue = getUploadQueue(lid);
+
+            if (!queue || queue.items.length === 0) {
+                await client.sock.sendMessage(from, { text: 'Tidak ada file yang tertampung. Silakan kirim file terlebih dahulu.' });
+                break;
+            }
+
+            let toUpload = queue.items;
+            if (body === 'upload foto') toUpload = queue.items.filter(i => i.type === 'foto');
+            if (body === 'upload video') toUpload = queue.items.filter(i => i.type === 'video');
+
+            if (toUpload.length === 0) {
+                await client.sock.sendMessage(from, { text: `Tidak ada ${body === 'upload foto' ? 'foto' : 'video'} yang tertampung.` });
+                break;
+            }
+
+            clearUploadQueue(lid);
+            await client.sock.sendMessage(from, { text: `⏳ Mengupload ${toUpload.length} file ke Google Drive...` });
+
+            try {
+                const { folder, results } = await uploadMediaBatch(from, toUpload);
+                const lines = [];
+                if (results.foto.length) lines.push(`✅ ${results.foto.length} foto berhasil diupload`);
+                if (results.video.length) lines.push(`✅ ${results.video.length} video berhasil diupload`);
+                if (results.gagal.length) lines.push(`❌ ${results.gagal.length} file gagal: ${results.gagal.join(', ')}`);
+
+                await client.sock.sendMessage(from, {
+                    text: `*Upload selesai ke folder ${folder.name}*\n\n${lines.join('\n')}`
+                });
+                logInteraction('OUTGOING', `reply=upload_batch_done | to=${senderName} | foto=${results.foto.length} | video=${results.video.length} | gagal=${results.gagal.length}`);
+            } catch (error) {
+                await client.sock.sendMessage(from, { text: `❌ Gagal upload: ${getDriveErrorMessage(error)}` });
+                logInteraction('OUTGOING', `reply=upload_batch_error | to=${senderName} | error=${error.message}`);
+            }
+
+            break;
+        }
 
         default:
             logInteraction('SKIP', `${chatType} | from=${senderName} | reason=unknown_command`);
@@ -1467,6 +2592,11 @@ async function handleMessage(msg, client) {
 }
 
 module.exports = { handleMessage };
+
+
+
+
+
 
 
 

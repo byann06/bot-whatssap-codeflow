@@ -1,4 +1,4 @@
-﻿const {
+const {
     default: makeWASocket,
     DisconnectReason,
     fetchLatestBaileysVersion,
@@ -12,8 +12,57 @@ const { handleMessage } = require('./handlers/menu');
 const fs = require('fs');
 
 const USE_PAIRING_CODE = process.argv.includes('pairing');
+const BRIDGE_NUMBER = (process.env.BRIDGE_PAIRING_NUMBER || '').replace(/\D/g, '') + '@s.whatsapp.net';
 const PAIRING_NUMBER = process.env.PAIRING_NUMBER?.replace(/\D/g, '') || '';
 const AUTH_DIR = path.join(__dirname, '.baileys_auth');
+// GIF maintenance (bot mati)
+const MAINTENANCE_GIF_URL = 'https://media.giphy.com/media/KQoQzycVECd9xUNpeP/giphy.mp4';
+// GIF done (bot hidup)
+const DONE_GIF_URL = 'https://media.giphy.com/media/ymjrojYpcJSMpZ9wRA/giphy.mp4';
+const BOT_NOTICE_GROUP_ID = process.env.BOT_NOTICE_GROUP_ID;
+const MAINTENANCE_SUMMARY = (process.env.MAINTENANCE_SUMMARY)
+    .split('|')
+    .map((item) => item.trim())
+    .filter(Boolean);
+let startupNoticeSent = false;
+let shutdownNoticeSent = false;
+
+function buildMaintenanceDoneText() {
+    const summary = MAINTENANCE_SUMMARY.length
+        ? `\n\nRingkasan maintenance:\n${MAINTENANCE_SUMMARY.map((item) => `>> ${item}`).join('\n')}`
+        : '';
+    return `MAINTENCE SELESAI😊${summary}`;
+}
+
+async function sendGroupNotice(sock, text, gifUrl = null) {
+    if (!BOT_NOTICE_GROUP_ID || !sock?.sendMessage) return;
+
+    if (gifUrl) {
+        await sock.sendMessage(BOT_NOTICE_GROUP_ID, {
+            video: { url: gifUrl },
+            caption: text,
+            gifPlayback: true,
+            mimetype: 'video/mp4',
+        });
+    } else {
+        await sock.sendMessage(BOT_NOTICE_GROUP_ID, { text });
+    }
+}
+
+async function notifyMaintenanceStart(reason = 'MAINTENCE') {
+    if (shutdownNoticeSent || !client.sock) return;
+    shutdownNoticeSent = true;
+    try {
+        await sendGroupNotice(client.sock, `BOT SEDANG ${reason} 😴😥.`, MAINTENANCE_GIF_URL);
+    } catch (error) {
+        console.error('Failed to send maintenance notice:', error.message);
+    }
+}
+
+async function shutdownBot(signal) {
+    await notifyMaintenanceStart('maintenance/perbaikan');
+    process.exit(signal === 'SIGINT' ? 0 : 1);
+}
 let cachedVersion;
 const client = {
     sock: null,
@@ -315,6 +364,14 @@ async function startBot() {
         if (connection === 'open') {
             client.info.wid._serialized = normalizeJid(jidNormalizedUser(sock.user?.id || ''));
             console.log('✅ Bot siap!');
+            if (!startupNoticeSent) {
+                startupNoticeSent = true;
+                try {
+                    await sendGroupNotice(sock, buildMaintenanceDoneText(), DONE_GIF_URL);
+                } catch (error) {
+                    console.error('Failed to send maintenance done notice:', error.message);
+                }
+            }
         }
 
         if (connection === 'close') {
@@ -343,6 +400,20 @@ async function startBot() {
             if (!message?.message || !message?.key?.remoteJid || message.key.fromMe) continue;
             if (message.key.remoteJid === 'status@broadcast') continue;
 
+            // Deteksi balasan "Kami beda 5 minit jeee" dari BRIDGE
+            const senderParticipant = message.key.participant || message.key.remoteJid;
+            const msgText = getMessageBody(message.message);
+            if (
+                BRIDGE_NUMBER &&
+                senderParticipant.startsWith(BRIDGE_NUMBER.split('@')[0]) &&
+                msgText === 'Kami beda 5 minit jeee 😤'
+            ) {
+                await sock.sendMessage(message.key.remoteJid, {
+                    text: 'Betul betul betul! 😄',
+                }, { quoted: message });
+                continue;
+            }
+
             try {
                 const wrappedMessage = wrapMessage(sock, message);
                 await handleMessage(wrappedMessage, client);
@@ -352,6 +423,14 @@ async function startBot() {
         }
     });
 }
+
+process.once('SIGINT', () => {
+    shutdownBot('SIGINT');
+});
+
+process.once('SIGTERM', () => {
+    shutdownBot('SIGTERM');
+});
 
 startBot().catch((error) => {
     console.error('Failed to start bot:', error);

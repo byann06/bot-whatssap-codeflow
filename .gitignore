@@ -1,7 +1,6 @@
 .baileys_auth/
 auth_*
 assets/sir-pai.jpg
-
 credentials/
 node_modules/
 data/
