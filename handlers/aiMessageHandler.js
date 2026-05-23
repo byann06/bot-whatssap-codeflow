@@ -65,6 +65,11 @@ async function handleAIMessage(sock, message) {
     const chatId = message.key.remoteJid || '';
     const senderId = message.key.participant || chatId;
     const isGroup = chatId.endsWith('@g.us');
+    const promptText = isGroup ? extractGroupPrompt(text) : text;
+    if (isGroup && !promptText) {
+        console.log('[AI] skip group message: trigger tidak ditemukan');
+        return false;
+    }
     const settingsService = getAISettingsService();
     const settings = isGroup
         ? settingsService.getGroupSettings(chatId)
@@ -79,13 +84,13 @@ async function handleAIMessage(sock, message) {
         await sendPresence(sock, chatId, 'composing');
         const history = memoryService.getHistory(chatId);
         const reply = await aiService.generateReply({
-            text,
+            text: promptText,
             senderId,
             chatId,
             history,
         });
 
-        memoryService.addMessage(chatId, 'user', text);
+        memoryService.addMessage(chatId, 'user', promptText);
         memoryService.addMessage(chatId, 'assistant', reply);
 
         await sock.sendMessage(chatId, { text: reply }, { quoted: message });
@@ -101,6 +106,17 @@ async function handleAIMessage(sock, message) {
     }
 }
 
+function extractGroupPrompt(text) {
+    const trigger = String(config.ai.groupTriggerWord || 'yanverse,').trim();
+    if (!trigger) return text;
+
+    const trimmedText = String(text || '').trim();
+    if (!trimmedText.toLowerCase().startsWith(trigger.toLowerCase())) {
+        return '';
+    }
+
+    return trimmedText.slice(trigger.length).trim();
+}
 function getPlainTextMessage(message) {
     const content = unwrapMessageContent(message.message);
     if (!content) return '';
@@ -157,4 +173,5 @@ module.exports = {
     handleAIMessage,
     getPlainTextMessage,
     shouldSkipText,
+    extractGroupPrompt,
 };

@@ -49,6 +49,7 @@ module.exports = {
         groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
         openRouterApiKey: process.env.OPENROUTER_API_KEY || '',
         openRouterModel: process.env.OPENROUTER_MODEL || 'openrouter/free',
+        groupTriggerWord: process.env.AI_GROUP_TRIGGER_WORD || 'yanverse,',
         replyCooldownMs: Number(process.env.AI_REPLY_COOLDOWN_MS || 5000),
         memoryMaxMessages: Number(process.env.AI_MEMORY_MAX_MESSAGES || 10),
         memoryMaxChars: Number(process.env.AI_MEMORY_MAX_CHARS || 1000),
