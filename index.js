@@ -14,27 +14,20 @@ const { handleAIMessage } = require('./handlers/aiMessageHandler');
 const fs = require('fs');
 const config = require('./config');
 const { sendGroupNotice } = require('./services/notification');
+const { buildMaintenanceStartText, buildMaintenanceDoneText } = require('./services/maintenanceService');
 
 const USE_PAIRING_CODE = process.argv.includes('pairing');
 const BRIDGE_NUMBER = (process.env.BRIDGE_PAIRING_NUMBER || '').replace(/\D/g, '') + '@s.whatsapp.net';
 const PAIRING_NUMBER = process.env.PAIRING_NUMBER?.replace(/\D/g, '') || '';
 const AUTH_DIR = path.join(__dirname, '.baileys_auth');
-const MAINTENANCE_SUMMARY = config.maintenance.summary;
 let startupNoticeSent = false;
 let shutdownNoticeSent = false;
-
-function buildMaintenanceDoneText() {
-    const summary = MAINTENANCE_SUMMARY.length
-        ? `\n\nRingkasan maintenance:\n${MAINTENANCE_SUMMARY.map((item) => `>> ${item}`).join('\n')}`
-        : '';
-    return `MAINTENCE SELESAI😊${summary}`;
-}
 
 async function notifyMaintenanceStart(reason = 'MAINTENCE') {
     if (shutdownNoticeSent || !client.sock) return;
     shutdownNoticeSent = true;
     try {
-        await sendGroupNotice(client.sock, `BOT SEDANG ${reason} 😴😥.`, { gifUrl: config.maintenance.startGifUrl });
+        await sendGroupNotice(client.sock, buildMaintenanceStartText(), { gifUrl: config.maintenance.startGifUrl });
     } catch (error) {
         console.error('Failed to send maintenance notice:', error.message);
     }

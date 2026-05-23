@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "version": "v0.1.0",
+  "summary": [
+    "Merapikan struktur folder",
+    "Menambahkan AI multi-provider fallback",
+    "Menambahkan persona Yanverse"
+  ]
+}

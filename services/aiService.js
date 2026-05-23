@@ -2,16 +2,9 @@ const { createAIProviderRouter } = require('./ai/aiProviderRouter');
 const { createGeminiProvider } = require('./ai/providers/geminiProvider');
 const { createGroqProvider } = require('./ai/providers/groqProvider');
 const { createOpenRouterProvider } = require('./ai/providers/openrouterProvider');
+const { YANVERSE_SYSTEM_PROMPT } = require('./ai/persona');
 
-const DEFAULT_SYSTEM_PROMPT = [
-    'Nama kamu adalah AI Bot Code Flow.',
-    'Kamu berjalan di WhatsApp bot komunitas Code Flow.',
-    'Gunakan bahasa Indonesia sehari-hari.',
-    'Jawaban harus singkat, jelas, dan cocok dibaca di WhatsApp.',
-    'Jangan terlalu formal dan jangan terdengar seperti customer service.',
-    'Jangan mengaku sebagai manusia. Kamu boleh bilang kamu AI/bot kalau relevan.',
-    'Bantu anggota dan pengurus Code Flow tanpa mengganggu command bot utama.',
-].join('\n');
+const DEFAULT_SYSTEM_PROMPT = YANVERSE_SYSTEM_PROMPT;
 
 function createAIService(options = {}) {
     const systemPrompt = options.systemPrompt || DEFAULT_SYSTEM_PROMPT;

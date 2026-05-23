@@ -1,5 +1,6 @@
 require('dotenv').config();
 const path = require('path');
+const { YANVERSE_SYSTEM_PROMPT } = require('../services/ai/persona');
 
 const rootDir = path.join(__dirname, '..');
 
@@ -18,6 +19,7 @@ module.exports = {
         members: path.join(dataDir, 'members.json'),
         attendance: path.join(dataDir, 'attendance.json'),
         documentation: path.join(dataDir, 'documentation.json'),
+        maintenance: path.join(dataDir, 'maintenance.json'),
         sirPai: path.join(assetsDir, 'sir-pai.jpg'),
     },
     roles: {
@@ -30,10 +32,6 @@ module.exports = {
     },
     botNoticeGroupId: process.env.BOT_NOTICE_GROUP_ID || '120363427721474222@g.us',
     maintenance: {
-        summary: (process.env.MAINTENANCE_SUMMARY || 'meningkatkan fitur absen|mengubah output daftar agar mempermudah pengguna')
-            .split('|')
-            .map((item) => item.trim())
-            .filter(Boolean),
         startGifUrl: process.env.MAINTENANCE_GIF_URL || 'https://media.giphy.com/media/KQoQzycVECd9xUNpeP/giphy.mp4',
         doneGifUrl: process.env.MAINTENANCE_DONE_GIF_URL || 'https://media.giphy.com/media/ymjrojYpcJSMpZ9wRA/giphy.mp4',
     },
@@ -50,6 +48,7 @@ module.exports = {
         openRouterApiKey: process.env.OPENROUTER_API_KEY || '',
         openRouterModel: process.env.OPENROUTER_MODEL || 'openrouter/free',
         groupTriggerWord: process.env.AI_GROUP_TRIGGER_WORD || 'yanverse,',
+        systemPrompt: process.env.AI_SYSTEM_PROMPT || YANVERSE_SYSTEM_PROMPT,
         replyCooldownMs: Number(process.env.AI_REPLY_COOLDOWN_MS || 5000),
         memoryMaxMessages: Number(process.env.AI_MEMORY_MAX_MESSAGES || 10),
         memoryMaxChars: Number(process.env.AI_MEMORY_MAX_CHARS || 1000),

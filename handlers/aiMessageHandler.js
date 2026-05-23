@@ -50,6 +50,7 @@ const aiService = createAIService({
     groqModel: config.ai.groqModel,
     openRouterApiKey: config.ai.openRouterApiKey,
     openRouterModel: config.ai.openRouterModel,
+    systemPrompt: config.ai.systemPrompt,
 });
 const memoryService = createAIMemoryService({
     maxMessages: config.ai.memoryMaxMessages,
