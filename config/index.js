@@ -1,0 +1,64 @@
+require('dotenv').config();
+const path = require('path');
+
+const rootDir = path.join(__dirname, '..');
+
+function csvEnv(name) {
+    return (process.env[name] || '').split(',').map((value) => value.trim()).filter(Boolean);
+}
+
+const dataDir = path.join(rootDir, 'data');
+const assetsDir = path.join(rootDir, 'assets');
+
+module.exports = {
+    rootDir,
+    dataDir,
+    assetsDir,
+    files: {
+        members: path.join(dataDir, 'members.json'),
+        attendance: path.join(dataDir, 'attendance.json'),
+        documentation: path.join(dataDir, 'documentation.json'),
+        sirPai: path.join(assetsDir, 'sir-pai.jpg'),
+    },
+    roles: {
+        adminPhone: csvEnv('ADMIN_PHONE'),
+        adminLid: csvEnv('ADMIN_LID'),
+        hadirLid: csvEnv('HADIR_LID'),
+        dokumentasiLid: csvEnv('DOKUMENTASI_LID'),
+        komunikasiLid: csvEnv('KOMUNIKASI_LID'),
+        pemateriLid: csvEnv('PEMATERI_LID'),
+    },
+    botNoticeGroupId: process.env.BOT_NOTICE_GROUP_ID || '120363427721474222@g.us',
+    maintenance: {
+        summary: (process.env.MAINTENANCE_SUMMARY || 'meningkatkan fitur absen|mengubah output daftar agar mempermudah pengguna')
+            .split('|')
+            .map((item) => item.trim())
+            .filter(Boolean),
+        startGifUrl: process.env.MAINTENANCE_GIF_URL || 'https://media.giphy.com/media/KQoQzycVECd9xUNpeP/giphy.mp4',
+        doneGifUrl: process.env.MAINTENANCE_DONE_GIF_URL || 'https://media.giphy.com/media/ymjrojYpcJSMpZ9wRA/giphy.mp4',
+    },
+    ai: {
+        provider: (process.env.AI_PROVIDER || 'gemini').trim().toLowerCase(),
+        fallbackProviders: (process.env.AI_FALLBACK_PROVIDERS || 'groq,openrouter')
+            .split(',')
+            .map((provider) => provider.trim().toLowerCase())
+            .filter(Boolean),
+        geminiApiKey: process.env.GEMINI_API_KEY || '',
+        geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+        groqApiKey: process.env.GROQ_API_KEY || '',
+        groqModel: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+        openRouterApiKey: process.env.OPENROUTER_API_KEY || '',
+        openRouterModel: process.env.OPENROUTER_MODEL || 'openrouter/free',
+        replyCooldownMs: Number(process.env.AI_REPLY_COOLDOWN_MS || 5000),
+        memoryMaxMessages: Number(process.env.AI_MEMORY_MAX_MESSAGES || 10),
+        memoryMaxChars: Number(process.env.AI_MEMORY_MAX_CHARS || 1000),
+        databasePath: process.env.DATABASE_PATH || path.join(dataDir, 'bot.sqlite'),
+    },
+    attendanceReminderMinutes: Number(process.env.ABSEN_REMINDER_MINUTES || 30),
+    attendanceKeys: {
+        sessions: '__sessions',
+        activeByChat: '__activeByChat',
+    },
+    allowedRoles: ['Anggota', 'Pengurus'],
+    allowedManagementRoles: ['Pembina', 'Ketua', 'Wakil Ketua', 'Sekretaris', 'Bendahara', 'Divisi Medig', 'Divisi Perlog', '-'],
+};

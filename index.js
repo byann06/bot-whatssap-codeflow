@@ -9,21 +9,17 @@ const {
 const qrcode = require('qrcode-terminal');
 const path = require('path');
 const { handleMessage } = require('./handlers/menu');
+const { handleAICommand } = require('./handlers/aiCommandHandler');
+const { handleAIMessage } = require('./handlers/aiMessageHandler');
 const fs = require('fs');
+const config = require('./config');
+const { sendGroupNotice } = require('./services/notification');
 
 const USE_PAIRING_CODE = process.argv.includes('pairing');
 const BRIDGE_NUMBER = (process.env.BRIDGE_PAIRING_NUMBER || '').replace(/\D/g, '') + '@s.whatsapp.net';
 const PAIRING_NUMBER = process.env.PAIRING_NUMBER?.replace(/\D/g, '') || '';
 const AUTH_DIR = path.join(__dirname, '.baileys_auth');
-// GIF maintenance (bot mati)
-const MAINTENANCE_GIF_URL = 'https://media.giphy.com/media/KQoQzycVECd9xUNpeP/giphy.mp4';
-// GIF done (bot hidup)
-const DONE_GIF_URL = 'https://media.giphy.com/media/ymjrojYpcJSMpZ9wRA/giphy.mp4';
-const BOT_NOTICE_GROUP_ID = process.env.BOT_NOTICE_GROUP_ID;
-const MAINTENANCE_SUMMARY = (process.env.MAINTENANCE_SUMMARY)
-    .split('|')
-    .map((item) => item.trim())
-    .filter(Boolean);
+const MAINTENANCE_SUMMARY = config.maintenance.summary;
 let startupNoticeSent = false;
 let shutdownNoticeSent = false;
 
@@ -34,26 +30,11 @@ function buildMaintenanceDoneText() {
     return `MAINTENCE SELESAI😊${summary}`;
 }
 
-async function sendGroupNotice(sock, text, gifUrl = null) {
-    if (!BOT_NOTICE_GROUP_ID || !sock?.sendMessage) return;
-
-    if (gifUrl) {
-        await sock.sendMessage(BOT_NOTICE_GROUP_ID, {
-            video: { url: gifUrl },
-            caption: text,
-            gifPlayback: true,
-            mimetype: 'video/mp4',
-        });
-    } else {
-        await sock.sendMessage(BOT_NOTICE_GROUP_ID, { text });
-    }
-}
-
 async function notifyMaintenanceStart(reason = 'MAINTENCE') {
     if (shutdownNoticeSent || !client.sock) return;
     shutdownNoticeSent = true;
     try {
-        await sendGroupNotice(client.sock, `BOT SEDANG ${reason} 😴😥.`, MAINTENANCE_GIF_URL);
+        await sendGroupNotice(client.sock, `BOT SEDANG ${reason} 😴😥.`, { gifUrl: config.maintenance.startGifUrl });
     } catch (error) {
         console.error('Failed to send maintenance notice:', error.message);
     }
@@ -367,7 +348,7 @@ async function startBot() {
             if (!startupNoticeSent) {
                 startupNoticeSent = true;
                 try {
-                    await sendGroupNotice(sock, buildMaintenanceDoneText(), DONE_GIF_URL);
+                    await sendGroupNotice(sock, buildMaintenanceDoneText(), { gifUrl: config.maintenance.doneGifUrl });
                 } catch (error) {
                     console.error('Failed to send maintenance done notice:', error.message);
                 }
@@ -415,8 +396,12 @@ async function startBot() {
             }
 
             try {
+                const aiCommandHandled = await handleAICommand(sock, message, msgText);
+                if (aiCommandHandled) continue;
+
                 const wrappedMessage = wrapMessage(sock, message);
                 await handleMessage(wrappedMessage, client);
+                await handleAIMessage(sock, message);
             } catch (error) {
                 console.error('Error handleMessage:', error);
             }

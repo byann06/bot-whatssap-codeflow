@@ -20,6 +20,43 @@ class MessageMedia {
 const pemateriData = require('../data/pemateri');
 const driveDocs = require('./drive');
 const { loadDocsState, listFoldersFromDrive, removeFolder, getMediaType, uploadMediaBatch } = driveDocs;
+const config = require('../config');
+const { loadMembers, saveMembers } = require('../repositories/members');
+const { loadAttendance, saveAttendance } = require('../repositories/attendance');
+const { sendBotNotice } = require('../services/notification');
+const {
+    getWibDateKey,
+    getWibTimeLabel,
+    formatDateKey,
+    parseWibDateTime,
+    formatDateTimeLabel,
+    normalizeDateInput,
+    normalizeTimeInput,
+    parseTimeRange,
+    isSkipValue,
+} = require('../lib/dateTime');
+const {
+    parseAttendanceCommand,
+    parseAttendanceReportCommand,
+} = require('../parsers/attendanceParser');
+const {
+    getAttendanceIdentity,
+    getAttendanceMeta,
+    getSessionExcuses,
+    getSessionTitle,
+    findOpenSessionForChat,
+    findRelevantSessionForExcuse,
+    createAttendanceSession,
+    openAttendanceSession,
+    closeAttendanceSession,
+    recordAttendanceInSession,
+    recordExcuseInSession,
+    removeAttendanceFromSession,
+    formatAttendanceSessionReport,
+    findScheduleByQuery,
+    saveAttendanceSession,
+    formatScheduleList,
+} = require('../services/attendanceService');
 
 const MENU_TEXT = `
 >>menu - melihat daftar perintah bot 
@@ -140,37 +177,25 @@ const ASPEK_PENILAIAN_TEXT = `
 Belum diinput
 `;
 const REGISTER_TEMPLATE = 'daftar | Nama Lengkap | NPM | Prodi | Role | Pengurus | Saran';
-const MEMBERS_FILE = path.join(__dirname, '..', 'data', 'members.json');
-const ATTENDANCE_FILE = path.join(__dirname, '..', 'data', 'attendance.json');
-const SIR_PAI_FILE = path.join(__dirname, '..', 'assets', 'sir-pai.jpg');
+const SIR_PAI_FILE = config.files.sirPai;
 const SIR_PAI_COOLDOWN_MS = 60 * 1000;
 const sirPaiCooldowns = new Map();
-const ADMIN_PHONE = (process.env.ADMIN_PHONE || '').split(',').map(v => v.trim()).filter(Boolean);
-const ADMIN_LID = (process.env.ADMIN_LID || '').split(',').map(v => v.trim()).filter(Boolean);
+const ADMIN_PHONE = config.roles.adminPhone;
+const ADMIN_LID = config.roles.adminLid;
 // Antrian upload media per admin
 const uploadQueue = new Map();
 const UPLOAD_TIMEOUT_MS = 2 * 60 * 1000; // 2 menit
 const UPLOAD_WARNING_MS = 105 * 1000; // warning di DETIK ke-1:45
-const HADIR_LID = (process.env.HADIR_LID || '').split(',').map(v => v.trim()).filter(Boolean);
-const DOKUMENTASI_LID = (process.env.DOKUMENTASI_LID || '').split(',').map(v => v.trim()).filter(Boolean);
-const KOMUNIKASI_LID = (process.env.KOMUNIKASI_LID || '').split(',').map(v => v.trim()).filter(Boolean);
-const PEMATERI_LID = (process.env.PEMATERI_LID || '').split(',').map(v => v.trim()).filter(Boolean);
-const ALLOWED_ROLE_VALUES = ['Anggota', 'Pengurus'];
-const ALLOWED_MANAGEMENT_VALUES = ['Pembina', 'Ketua', 'Wakil Ketua', 'Sekretaris', 'Bendahara', 'Divisi Medig', 'Divisi Perlog', '-'];
-const ATTENDANCE_SESSIONS_KEY = '__sessions';
-const ATTENDANCE_ACTIVE_KEY = '__activeByChat';
-const ATTENDANCE_REMINDER_MINUTES = Number(process.env.ABSEN_REMINDER_MINUTES || 30);
+const HADIR_LID = config.roles.hadirLid;
+const DOKUMENTASI_LID = config.roles.dokumentasiLid;
+const KOMUNIKASI_LID = config.roles.komunikasiLid;
+const PEMATERI_LID = config.roles.pemateriLid;
+const ALLOWED_ROLE_VALUES = config.allowedRoles;
+const ALLOWED_MANAGEMENT_VALUES = config.allowedManagementRoles;
+const ATTENDANCE_SESSIONS_KEY = config.attendanceKeys.sessions;
+const ATTENDANCE_ACTIVE_KEY = config.attendanceKeys.activeByChat;
+const ATTENDANCE_REMINDER_MINUTES = config.attendanceReminderMinutes;
 const attendanceReminderTimers = new Map();
-const BOT_NOTICE_GROUP_ID = process.env.BOT_NOTICE_GROUP_ID;
-
-async function sendBotNotice(client, text) {
-    if (!BOT_NOTICE_GROUP_ID || !client?.sock?.sendMessage) return;
-    try {
-        await client.sock.sendMessage(BOT_NOTICE_GROUP_ID, { text });
-    } catch (error) {
-        logInteraction('WARN', `bot_notice_failed | group=${BOT_NOTICE_GROUP_ID} | error="${error.message}"`);
-    }
-}
 const conversationStates = new Map();
 
 function getConversationKey(identity, chatId) {
@@ -179,32 +204,6 @@ function getConversationKey(identity, chatId) {
 
 function splitCommaValues(value) {
     return String(value || '').split(',').map((part) => part.trim()).filter(Boolean);
-}
-
-function normalizeDateInput(value) {
-    const text = String(value || '').trim();
-    let match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (match) return `${match[1]}-${match[2]}-${match[3]}`;
-    match = text.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
-    if (!match) return null;
-    return `${match[3]}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}`;
-}
-
-function normalizeTimeInput(value) {
-    const match = String(value || '').trim().match(/^([0-2]?\d)[.:]([0-5]\d)$/);
-    if (!match) return null;
-    const hour = Number(match[1]);
-    if (hour > 23) return null;
-    return `${String(hour).padStart(2, '0')}:${match[2]}`;
-}
-
-function parseTimeRange(value) {
-    const parts = String(value || '').split('-').map((part) => normalizeTimeInput(part));
-    return { startTime: parts[0] || null, endTime: parts[1] || null };
-}
-
-function isSkipValue(value) {
-    return /^(belum|nanti|skip|lewati|-|tidak)$/i.test(String(value || '').trim());
 }
 
 function parseRegisterText(rawBody) {
@@ -264,48 +263,6 @@ function buildRegisterCommand(data) {
     };
 }
 
-function getScheduleList() {
-    const attendance = loadAttendance();
-    const { sessions } = getAttendanceMeta(attendance);
-    return Object.values(sessions).sort((a, b) => String(a.dateKey || '').localeCompare(String(b.dateKey || '')) || String(a.startTime || '').localeCompare(String(b.startTime || '')));
-}
-
-function findScheduleByQuery(query, chatId) {
-    const schedules = getScheduleList();
-    const scope = getChatScope(chatId);
-    const raw = String(query || '').trim();
-    const numberMatch = raw.match(/^(?:jadwal\s*)?(\d+)$/i);
-    if (numberMatch) return schedules[Number(numberMatch[1]) - 1] || null;
-    const dateKey = normalizeDateInput(raw);
-    const normalized = normalizeNameKey(raw);
-    return schedules.find((session) =>
-        session.id === raw ||
-        session.dateKey === dateKey ||
-        normalizeNameKey(session.title) === normalized ||
-        normalizeNameKey(session.title).includes(normalized) ||
-        (session.chatId === scope && normalized === 'aktif')
-    ) || null;
-}
-
-function saveAttendanceSession(session) {
-    const attendance = loadAttendance();
-    const existing = findSessionById(attendance, session.id);
-    if (!existing) return null;
-    Object.assign(existing, session);
-    saveAttendance(attendance);
-    return existing;
-}
-
-function formatScheduleList() {
-    const schedules = getScheduleList();
-    if (!schedules.length) return 'belum ada jadwal absen.';
-    const lines = schedules.map((session, index) => {
-        const closeLabel = session.endTime ? `-${session.endTime.replace(':', '.')}` : '';
-        return `${index + 1}. ${getSessionTitle(session)} | ${formatDateKey(session.dateKey)} | ${(session.startTime || '-').replace(':', '.')}${closeLabel} | ${session.status}`;
-    });
-    return `*Jadwal Absen*\n${lines.join('\n')}`;
-}
-
 function logInteraction(type, details) {
     const timestamp = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
     console.log(`[${timestamp}] [${type}] ${details}`);
@@ -356,367 +313,7 @@ function normalizeManagementRole(value) {
     return matchedValue || null;
 }
 
-function loadMembers() {
-    if (!fs.existsSync(MEMBERS_FILE)) {
-        return [];
-    }
-
-    try {
-        const raw = fs.readFileSync(MEMBERS_FILE, 'utf8');
-        const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed : [];
-    } catch (error) {
-        logInteraction('WARN', `members | reason=load_failed | error="${error.message}"`);
-        return [];
-    }
-}
-
-function saveMembers(members) {
-    fs.writeFileSync(MEMBERS_FILE, `${JSON.stringify(members, null, 2)}\n`, 'utf8');
-}
-
-function loadAttendance() {
-    if (!fs.existsSync(ATTENDANCE_FILE)) {
-        return {};
-    }
-
-    try {
-        const raw = fs.readFileSync(ATTENDANCE_FILE, 'utf8');
-        const parsed = JSON.parse(raw);
-        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-    } catch (error) {
-        logInteraction('WARN', 'attendance | reason=load_failed | error=' + error.message);
-        return {};
-    }
-}
-
-function saveAttendance(attendance) {
-    fs.writeFileSync(ATTENDANCE_FILE, JSON.stringify(attendance, null, 2) + '\n', 'utf8');
-}
-
-function getWibDateKey(date = new Date()) {
-    return new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'Asia/Jakarta',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-    }).format(date);
-}
-
-function getWibTimeLabel(date = new Date()) {
-    return new Intl.DateTimeFormat('id-ID', {
-        timeZone: 'Asia/Jakarta',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-    }).format(date).replace(':', '.');
-}
-
-function formatDateKey(dateKey) {
-    const [year, month, day] = String(dateKey || '').split('-');
-    return year && month && day ? day + '/' + month + '/' + year : dateKey;
-}
-
-function parseWibDateTime(dateKey, timeLabel) {
-    const [year, month, day] = String(dateKey || '').split('-').map(Number);
-    const [hour, minute] = String(timeLabel || '').split(':').map(Number);
-    if (!year || !month || !day || !Number.isInteger(hour) || !Number.isInteger(minute)) {
-        return null;
-    }
-
-    return new Date(Date.UTC(year, month - 1, day, hour - 7, minute, 0));
-}
-
-function formatDateTimeLabel(dateKey, timeLabel) {
-    return `${formatDateKey(dateKey)} pukul ${String(timeLabel || '').replace(':', '.')} WIB`;
-}
-
-function slugifyId(value) {
-    return String(value || '')
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '') || 'sesi';
-}
-
-function getChatScope(chatId) {
-    return chatId && chatId.endsWith('@g.us') ? chatId : 'global';
-}
-
-function getAttendanceMeta(attendance) {
-    if (!attendance[ATTENDANCE_SESSIONS_KEY] || typeof attendance[ATTENDANCE_SESSIONS_KEY] !== 'object') {
-        attendance[ATTENDANCE_SESSIONS_KEY] = {};
-    }
-
-    if (!attendance[ATTENDANCE_ACTIVE_KEY] || typeof attendance[ATTENDANCE_ACTIVE_KEY] !== 'object') {
-        attendance[ATTENDANCE_ACTIVE_KEY] = {};
-    }
-
-    return {
-        sessions: attendance[ATTENDANCE_SESSIONS_KEY],
-        activeByChat: attendance[ATTENDANCE_ACTIVE_KEY],
-    };
-}
-
-function getSessionRecords(session) {
-    if (!Array.isArray(session.records)) session.records = [];
-    return session.records;
-}
-
-function getSessionExcuses(session) {
-    if (!Array.isArray(session.excuses)) session.excuses = [];
-    return session.excuses;
-}
-
-function getSessionTitle(session) {
-    return session?.title || `Pertemuan ${session?.dateKey || ''}`.trim();
-}
-
-function findSessionById(attendance, sessionId) {
-    const { sessions } = getAttendanceMeta(attendance);
-    return sessions[sessionId] || null;
-}
-
-function findOpenSessionForChat(attendance, chatId) {
-    const { sessions, activeByChat } = getAttendanceMeta(attendance);
-    const scope = getChatScope(chatId);
-    const activeId = activeByChat[scope] || activeByChat.global;
-    const activeSession = activeId ? sessions[activeId] : null;
-    if (activeSession?.status === 'open') return activeSession;
-
-    return Object.values(sessions)
-        .filter((session) => session.status === 'open' && (session.chatId === scope || session.chatId === 'global'))
-        .sort((a, b) => String(b.openedAt || '').localeCompare(String(a.openedAt || '')))[0] || null;
-}
-
-function findRelevantSessionForExcuse(attendance, chatId) {
-    const open = findOpenSessionForChat(attendance, chatId);
-    if (open) return open;
-
-    const { sessions } = getAttendanceMeta(attendance);
-    const scope = getChatScope(chatId);
-    const now = new Date();
-    return Object.values(sessions)
-        .filter((session) => ['scheduled', 'open'].includes(session.status))
-        .filter((session) => session.chatId === scope || session.chatId === 'global' || scope === 'global')
-        .map((session) => ({ session, startsAt: parseWibDateTime(session.dateKey, session.startTime) }))
-        .filter((item) => !item.startsAt || item.startsAt.getTime() >= now.getTime() - 24 * 60 * 60 * 1000)
-        .sort((a, b) => (a.startsAt?.getTime() || 0) - (b.startsAt?.getTime() || 0))[0]?.session || null;
-}
-
-function createAttendanceSession(chatId, dateKey, startTime, title, createdBy, endTime = null) {
-    const attendance = loadAttendance();
-    const { sessions } = getAttendanceMeta(attendance);
-    const safeTitle = String(title || `Pertemuan ${formatDateKey(dateKey)}`).trim();
-    const idBase = `${dateKey}-${startTime}-${slugifyId(safeTitle)}`;
-    let id = idBase;
-    let counter = 2;
-    while (sessions[id]) {
-        id = `${idBase}-${counter}`;
-        counter += 1;
-    }
-
-    sessions[id] = {
-        id,
-        chatId: getChatScope(chatId),
-        title: safeTitle,
-        dateKey,
-        startTime,
-        ...(endTime && { endTime }),
-        status: 'scheduled',
-        createdBy: createdBy || '-',
-        createdAt: new Date().toISOString(),
-        reminderSent: false,
-        records: [],
-        excuses: [],
-    };
-
-    saveAttendance(attendance);
-    return sessions[id];
-}
-
-function openAttendanceSession(chatId, title) {
-    const attendance = loadAttendance();
-    const { sessions, activeByChat } = getAttendanceMeta(attendance);
-    const scope = getChatScope(chatId);
-    let session = Object.values(sessions)
-        .filter((item) => ['scheduled', 'open'].includes(item.status))
-        .filter((item) => item.chatId === scope || item.chatId === 'global')
-        .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0];
-
-    if (!session) {
-        const dateKey = getWibDateKey();
-        const nowTime = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
-        session = createAttendanceSession(chatId, dateKey, nowTime, title || `Absensi ${formatDateKey(dateKey)}`, 'admin');
-    }
-
-    session.status = 'open';
-    session.openedAt = new Date().toISOString();
-    if (title) session.title = title;
-    activeByChat[scope] = session.id;
-    saveAttendance(attendance);
-    return session;
-}
-
-function closeAttendanceSession(chatId) {
-    const attendance = loadAttendance();
-    const session = findOpenSessionForChat(attendance, chatId);
-    if (!session) return null;
-    const { activeByChat } = getAttendanceMeta(attendance);
-    session.status = 'closed';
-    session.closedAt = new Date().toISOString();
-    for (const [scope, sessionId] of Object.entries(activeByChat)) {
-        if (sessionId === session.id) delete activeByChat[scope];
-    }
-    saveAttendance(attendance);
-    return session;
-}
-
-function recordAttendanceInSession(sessionId, member, identity = {}) {
-    const attendance = loadAttendance();
-    const session = findSessionById(attendance, sessionId);
-    if (!session) return { status: 'missing' };
-    const records = getSessionRecords(session);
-    const attendanceIdentity = getAttendanceIdentity(identity) || getAttendanceIdentity(member);
-    const existing = records.find((record) => getAttendanceIdentity(record) === attendanceIdentity);
-    if (existing) return { status: 'exists', session, record: existing };
-
-    const now = new Date();
-    const record = {
-        phone: normalizePhone(identity.phone || member.phone),
-        lid: normalizeLid(identity.lid || member.lid),
-        name: member.name || '-',
-        npm: member.npm || '',
-        role: member.role || '-',
-        status: 'hadir',
-        time: getWibTimeLabel(now),
-        timestamp: now.toISOString(),
-    };
-    records.push(record);
-    saveAttendance(attendance);
-    return { status: 'saved', session, record };
-}
-
-function recordExcuseInSession(sessionId, member, identity = {}, reason = '', proof = null) {
-    const attendance = loadAttendance();
-    const session = findSessionById(attendance, sessionId);
-    if (!session) return { status: 'missing' };
-    const excuses = getSessionExcuses(session);
-    const excuseIdentity = getAttendanceIdentity(identity) || getAttendanceIdentity(member);
-    const existing = excuses.find((record) => getAttendanceIdentity(record) === excuseIdentity);
-    const now = new Date();
-    const record = {
-        phone: normalizePhone(identity.phone || member.phone),
-        lid: normalizeLid(identity.lid || member.lid),
-        name: member.name || '-',
-        npm: member.npm || '',
-        role: member.role || '-',
-        status: 'izin',
-        reason: String(reason || '').trim() || '-',
-        proof: proof || null,
-        time: getWibTimeLabel(now),
-        timestamp: now.toISOString(),
-    };
-
-    if (existing) {
-        Object.assign(existing, record);
-    } else {
-        excuses.push(record);
-    }
-
-    saveAttendance(attendance);
-    return { status: existing ? 'updated' : 'saved', session, record };
-}
-
-function removeAttendanceFromSession(chatId, query) {
-    const attendance = loadAttendance();
-    const session = findOpenSessionForChat(attendance, chatId) || findRelevantSessionForExcuse(attendance, chatId);
-    if (!session) return { status: 'no_session' };
-    const normalizedQuery = normalizeNameKey(query);
-    const records = getSessionRecords(session);
-    const index = records.findIndex((record) =>
-        normalizeNameKey(record.name) === normalizedQuery ||
-        normalizeNameKey(record.npm) === normalizedQuery ||
-        normalizeNameKey(record.lid) === normalizedQuery
-    );
-    if (index < 0) return { status: 'not_found', session };
-    const [removed] = records.splice(index, 1);
-    saveAttendance(attendance);
-    return { status: 'removed', session, removed };
-}
-
-function formatAttendanceSessionReport(session) {
-    const records = getSessionRecords(session);
-    const excuses = getSessionExcuses(session);
-    const presentNames = new Set(records.map((record) => normalizeNameKey(record.name)).filter(Boolean));
-    const excuseNames = new Set(excuses.map((record) => normalizeNameKey(record.name)).filter(Boolean));
-    const alpaMembers = loadMembers().filter((member) => {
-        const nameKey = normalizeNameKey(member.name);
-        return nameKey && !presentNames.has(nameKey) && !excuseNames.has(nameKey);
-    });
-
-    const hadirLines = records.length
-        ? records.map((record, index) => `${index + 1}. ${record.name || '-'} - ${record.time || '-'} WIB`).join('\n')
-        : 'Belum ada yang hadir.';
-    const izinLines = excuses.length
-        ? excuses.map((record, index) => `${index + 1}. ${record.name || '-'} - ${record.reason || '-'}${record.proof ? ' (Memberikan Bukti Foto)' : ''}`).join('\n')
-        : 'Belum ada izin.';
-    const alpaLines = alpaMembers.length
-        ? alpaMembers.map((member, index) => `${index + 1}. ${member.name || '-'}`).join('\n')
-        : 'Tidak ada.';
-
-    return `*Daftar Hadir - ${getSessionTitle(session)}*\n${formatDateTimeLabel(session.dateKey, session.startTime)}\nStatus: ${session.status}\n\n*Hadir (${records.length})*\n${hadirLines}\n\n*Izin (${excuses.length})*\n${izinLines}\n\n*Alpa (${alpaMembers.length})*\n${alpaLines}`;
-}
-
-function parseAttendanceCommand(rawBody) {
-    const text = String(rawBody || '').trim();
-
-    if (/^buat\s+jadwal$/i.test(text)) return { primary: 'buat jadwal', type: 'schedule_prompt' };
-
-    const easySchedule = text.match(/^buat\s+jadwal\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*(.+)$/i);
-    if (easySchedule) {
-        const dateKey = normalizeDateInput(easySchedule[1]);
-        const range = parseTimeRange(easySchedule[2]);
-        return { primary: 'buat jadwal', type: 'schedule', dateKey, startTime: range.startTime, endTime: range.endTime, title: easySchedule[3].trim() };
-    }
-
-    const scheduleMatch = text.match(/^jadwal\s+absen\s*\|\s*([^|]+)\s*\|\s*([^|]+)(?:\s*\|\s*(.+))?$/i);
-    if (scheduleMatch) {
-        const dateKey = normalizeDateInput(scheduleMatch[1]);
-        const range = parseTimeRange(scheduleMatch[2]);
-        return { primary: 'jadwal absen', type: 'schedule', dateKey, startTime: range.startTime, endTime: range.endTime, title: (scheduleMatch[3] || '').trim() };
-    }
-
-    if (/^(liat|lihat)\s+jadwal$/i.test(text)) return { primary: 'liat jadwal', type: 'schedule_list' };
-
-    const deleteSchedule = text.match(/^hapus\s+jadwal\s*,\s*(.+)$/i);
-    if (deleteSchedule) return { primary: 'hapus jadwal', type: 'schedule_delete', query: deleteSchedule[1].trim() };
-
-    const changeSchedule = text.match(/^ubah\s+jadwal\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*(.+)$/i);
-    if (changeSchedule) return { primary: 'ubah jadwal', type: 'schedule_update', query: changeSchedule[1].trim(), field: changeSchedule[2].trim().toLowerCase(), value: changeSchedule[3].trim() };
-
-    const startUpdate = text.match(/^jam\s+absen\s*,?\s*(.+)$/i);
-    if (startUpdate) return { primary: 'jam absen', type: 'schedule_set_start', value: startUpdate[1].trim() };
-
-    const closeUpdate = text.match(/^close\s+absen\s*,?\s*(.+)$/i);
-    if (closeUpdate) return { primary: 'close absen', type: 'schedule_set_end', value: closeUpdate[1].trim() };
-
-    const openMatch = text.match(/^buka\s+absen(?:\s*[,|]\s*(.+))?$/i);
-    if (openMatch) return { primary: 'buka absen', type: 'open', title: (openMatch[1] || '').trim() };
-
-    if (/^tutup\s+absen$/i.test(text)) return { primary: 'tutup absen', type: 'close' };
-
-    const removeMatch = text.match(/^hapus\s+hadir\s+(.+)$/i);
-    if (removeMatch) return { primary: 'hapus hadir', type: 'remove', query: removeMatch[1].trim() };
-
-    const excuseMatch = text.match(/^izin(?:\s*[|,]\s*(.+))?$/i);
-    if (excuseMatch) return { primary: 'izin', type: 'excuse', reason: (excuseMatch[1] || '').trim() };
-
-    const excuseListMatch = text.match(/^daftar\s+izin(?:\s+(.+))?$/i);
-    if (excuseListMatch) return { primary: 'daftar izin', type: 'excuse_report', dateKey: normalizeDateInput(excuseListMatch[1]) || getWibDateKey() };
-
-    return null;
-} function scheduleAttendanceReminder(client, session, targetChatId) {
+function scheduleAttendanceReminder(client, session, targetChatId) {
     if (!client?.sock || !session?.id || attendanceReminderTimers.has(session.id)) {
         return;
     }
@@ -748,18 +345,6 @@ function parseAttendanceCommand(rawBody) {
 
     attendanceReminderTimers.set(session.id, timer);
 }
-function parseAttendanceReportCommand(rawBody) {
-    const match = String(rawBody || '').trim().match(/^daftar\s+hadir(?:\s+(\d{4}-\d{2}-\d{2}))?$/i);
-    if (!match) {
-        return null;
-    }
-
-    return {
-        dateKey: match[1] || getWibDateKey(),
-        hasExplicitDate: Boolean(match[1]),
-    };
-}
-
 function parseDocumentationCommand(rawBody) {
     const text = String(rawBody || '').trim();
 
@@ -859,15 +444,6 @@ function getDriveErrorMessage(error) {
     };
 
     return messages[code] || `terjadi error dokumentasi: ${code || 'unknown_error'}`;
-}
-
-function getAttendanceIdentity(value) {
-    const lid = normalizeLid(value?.lid);
-    if (lid) {
-        return lid;
-    }
-
-    return normalizePhone(value?.phone || value);
 }
 
 function recordAttendance(member, identity = {}) {
@@ -2135,7 +1711,8 @@ async function handleMessage(msg, client) {
                 break;
             }
 
-            await replyToUser(msg, contact, senderName, `*${result.removed.name}* dihapus dari daftar hadir sesi *${getSessionTitle(result.session)}*.`);
+            const removedType = result.type === 'izin' ? 'daftar izin' : 'daftar hadir';
+            await replyToUser(msg, contact, senderName, `*${result.removed.name}* dihapus dari ${removedType} sesi *${getSessionTitle(result.session)}*.`);
             break;
         }
 
