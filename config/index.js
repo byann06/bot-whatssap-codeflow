@@ -10,11 +10,13 @@ function csvEnv(name) {
 
 const dataDir = path.join(rootDir, 'data');
 const assetsDir = path.join(rootDir, 'assets');
+const knowledgeDir = path.join(rootDir, 'knowledge');
 
 module.exports = {
     rootDir,
     dataDir,
     assetsDir,
+    knowledgeDir,
     files: {
         members: path.join(dataDir, 'members.json'),
         attendance: path.join(dataDir, 'attendance.json'),
@@ -31,6 +33,7 @@ module.exports = {
         pemateriLid: csvEnv('PEMATERI_LID'),
     },
     botNoticeGroupId: process.env.BOT_NOTICE_GROUP_ID || '120363427721474222@g.us',
+    messageMaxAgeSeconds: Number(process.env.BOT_MAX_MESSAGE_AGE_SECONDS || 120),
     maintenance: {
         startGifUrl: process.env.MAINTENANCE_GIF_URL || 'https://media.giphy.com/media/KQoQzycVECd9xUNpeP/giphy.mp4',
         doneGifUrl: process.env.MAINTENANCE_DONE_GIF_URL || 'https://media.giphy.com/media/ymjrojYpcJSMpZ9wRA/giphy.mp4',
@@ -53,6 +56,9 @@ module.exports = {
         memoryMaxMessages: Number(process.env.AI_MEMORY_MAX_MESSAGES || 10),
         memoryMaxChars: Number(process.env.AI_MEMORY_MAX_CHARS || 1000),
         databasePath: process.env.DATABASE_PATH || path.join(dataDir, 'bot.sqlite'),
+        knowledgeDir,
+        knowledgeMaxContextChars: Number(process.env.AI_KNOWLEDGE_MAX_CONTEXT_CHARS || 3500),
+        knowledgeMaxSections: Number(process.env.AI_KNOWLEDGE_MAX_SECTIONS || 5),
     },
     attendanceReminderMinutes: Number(process.env.ABSEN_REMINDER_MINUTES || 30),
     attendanceKeys: {

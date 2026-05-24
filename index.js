@@ -22,6 +22,7 @@ const PAIRING_NUMBER = process.env.PAIRING_NUMBER?.replace(/\D/g, '') || '';
 const AUTH_DIR = path.join(__dirname, '.baileys_auth');
 let startupNoticeSent = false;
 let shutdownNoticeSent = false;
+let skippedOldMessageLogCount = 0;
 
 async function notifyMaintenanceStart(reason = 'MAINTENCE') {
     if (shutdownNoticeSent || !client.sock) return;
@@ -49,6 +50,44 @@ const client = {
 
 
 
+
+function getMessageTimestampMs(message) {
+    const timestamp = message?.messageTimestamp;
+    if (!timestamp) return 0;
+
+    let timestampValue = 0;
+    if (typeof timestamp === 'number') {
+        timestampValue = timestamp;
+    } else if (typeof timestamp === 'bigint') {
+        timestampValue = Number(timestamp);
+    } else if (typeof timestamp.toNumber === 'function') {
+        timestampValue = timestamp.toNumber();
+    } else {
+        timestampValue = Number(timestamp);
+    }
+
+    if (!Number.isFinite(timestampValue) || timestampValue <= 0) return 0;
+    return timestampValue > 1e12 ? timestampValue : timestampValue * 1000;
+}
+
+function isOldMessage(message) {
+    const maxAgeSeconds = Number(config.messageMaxAgeSeconds || 0);
+    if (!maxAgeSeconds || maxAgeSeconds < 0) return false;
+
+    const timestampMs = getMessageTimestampMs(message);
+    if (!timestampMs) return false;
+
+    return Date.now() - timestampMs > maxAgeSeconds * 1000;
+}
+
+function logOldMessageSkip(message) {
+    if (skippedOldMessageLogCount >= 5) return;
+    skippedOldMessageLogCount += 1;
+
+    const timestampMs = getMessageTimestampMs(message);
+    const ageSeconds = timestampMs ? Math.round((Date.now() - timestampMs) / 1000) : '?';
+    console.log('[SKIP] old message ignored | chat=' + message.key.remoteJid + ' | age=' + ageSeconds + 's');
+}
 
 function normalizeJid(value) {
     if (!value) {
@@ -373,6 +412,10 @@ async function startBot() {
         for (const message of messages) {
             if (!message?.message || !message?.key?.remoteJid || message.key.fromMe) continue;
             if (message.key.remoteJid === 'status@broadcast') continue;
+            if (isOldMessage(message)) {
+                logOldMessageSkip(message);
+                continue;
+            }
 
             // Deteksi balasan "Kami beda 5 minit jeee" dari BRIDGE
             const senderParticipant = message.key.participant || message.key.remoteJid;

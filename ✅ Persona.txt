@@ -1,0 +1,15 @@
+✅ Persona
+✅ Multi-provider
+✅ Memory
+✅ Knowledge base
+✅ Retrieval
+
+⬇ NEXT
+
+✅ Google Integration
+⬇
+✅ Dynamic Knowledge
+⬇
+✅ Tool Calling
+⬇
+✅ AI Organization Assistant 😭

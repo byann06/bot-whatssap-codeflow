@@ -51,6 +51,9 @@ const aiService = createAIService({
     openRouterApiKey: config.ai.openRouterApiKey,
     openRouterModel: config.ai.openRouterModel,
     systemPrompt: config.ai.systemPrompt,
+    knowledgeDir: config.ai.knowledgeDir,
+    knowledgeMaxContextChars: config.ai.knowledgeMaxContextChars,
+    knowledgeMaxSections: config.ai.knowledgeMaxSections,
 });
 const memoryService = createAIMemoryService({
     maxMessages: config.ai.memoryMaxMessages,
@@ -94,7 +97,7 @@ async function handleAIMessage(sock, message) {
         memoryService.addMessage(chatId, 'user', promptText);
         memoryService.addMessage(chatId, 'assistant', reply);
 
-        await sock.sendMessage(chatId, { text: reply }, { quoted: message });
+        await sendAIReply(sock, chatId, reply, message, promptText);
         return true;
     } catch (error) {
         console.error('AI auto reply failed:', error.message);
@@ -161,6 +164,102 @@ function isCoolingDown(chatId) {
     return Date.now() - lastReplyAt < cooldownMs;
 }
 
+function splitCodeResponse(text) {
+    const rawText = String(text || '').trim();
+    const parts = [];
+    const codeBlockPattern = /```([a-zA-Z0-9#+._-]*)?\s*\r?\n([\s\S]*?)```/g;
+    let cursor = 0;
+    let match;
+
+    while ((match = codeBlockPattern.exec(rawText)) !== null) {
+        const before = rawText.slice(cursor, match.index).trim();
+        if (before) {
+            parts.push({ type: 'text', text: before });
+        }
+
+        const language = normalizeCodeLanguage(match[1] || 'text');
+        const code = String(match[2] || '').trim();
+        if (code) {
+            parts.push({
+                type: 'code',
+                text: '> ' + formatLanguageLabel(language) + '\n```\n' + code + '\n```',
+            });
+        }
+
+        cursor = codeBlockPattern.lastIndex;
+    }
+
+    const after = rawText.slice(cursor).trim();
+    if (after) {
+        parts.push({ type: 'text', text: after });
+    }
+
+    return parts.length ? parts : [{ type: 'text', text: rawText }];
+}
+function normalizeCodeLanguage(language) {
+    const normalized = String(language || 'text').trim().toLowerCase();
+    const aliases = {
+        js: 'javascript',
+        py: 'python',
+        ts: 'typescript',
+        sh: 'bash',
+        shell: 'bash',
+        'c++': 'cpp',
+    };
+
+    return aliases[normalized] || normalized.replace(/[^a-z0-9#+._-]/g, '') || 'text';
+}
+function formatLanguageLabel(language) {
+    const normalized = String(language || 'text').trim().toLowerCase();
+    const labels = {
+        javascript: 'JavaScript',
+        typescript: 'TypeScript',
+        python: 'Python',
+        html: 'HTML',
+        css: 'CSS',
+        json: 'JSON',
+        bash: 'Bash',
+        sql: 'SQL',
+        java: 'Java',
+        php: 'PHP',
+        cpp: 'C++',
+        c: 'C',
+        go: 'Go',
+        rust: 'Rust',
+        text: 'Code',
+    };
+
+    return labels[normalized] || normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+function isSourceCodeOnlyRequest(text) {
+    const normalized = String(text || '').toLowerCase();
+    return (
+        normalized.includes('cuma source code') ||
+        normalized.includes('source code aja') ||
+        normalized.includes('source code saja') ||
+        normalized.includes('cuma kode') ||
+        normalized.includes('kode aja') ||
+        normalized.includes('kode saja') ||
+        normalized.includes('code only') ||
+        normalized.includes('only code')
+    );
+}
+
+async function sendAIReply(sock, chatId, text, quotedMessage, promptText = '') {
+    let parts = splitCodeResponse(text).filter((part) => part.text);
+
+    if (isSourceCodeOnlyRequest(promptText)) {
+        const codeParts = parts.filter((part) => part.type === 'code');
+        if (codeParts.length) {
+            parts = codeParts;
+        }
+    }
+
+    for (let index = 0; index < parts.length; index += 1) {
+        const options = index === 0 ? { quoted: quotedMessage } : {};
+        await sock.sendMessage(chatId, { text: parts[index].text }, options);
+    }
+}
 async function sendPresence(sock, chatId, presence) {
     if (typeof sock.sendPresenceUpdate !== 'function') return;
     try {
@@ -175,4 +274,8 @@ module.exports = {
     getPlainTextMessage,
     shouldSkipText,
     extractGroupPrompt,
+    splitCodeResponse,
+    normalizeCodeLanguage,
+    formatLanguageLabel,
+    isSourceCodeOnlyRequest,
 };
