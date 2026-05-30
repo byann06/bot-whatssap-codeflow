@@ -10,6 +10,8 @@ const qrcode = require('qrcode-terminal');
 const path = require('path');
 const { handleMessage } = require('./handlers/menu');
 const { handleAICommand } = require('./handlers/aiCommandHandler');
+const { handleKnowledgeCommand } = require('./handlers/knowledgeCommandHandler');
+const { handleAdminSheetsCommand } = require('./handlers/adminSheetsCommandHandler');
 const { handleAIMessage } = require('./handlers/aiMessageHandler');
 const fs = require('fs');
 const config = require('./config');
@@ -432,6 +434,12 @@ async function startBot() {
             }
 
             try {
+                const adminSheetsCommandHandled = await handleAdminSheetsCommand(sock, message, msgText);
+                if (adminSheetsCommandHandled) continue;
+
+                const knowledgeCommandHandled = await handleKnowledgeCommand(sock, message, msgText);
+                if (knowledgeCommandHandled) continue;
+
                 const aiCommandHandled = await handleAICommand(sock, message, msgText);
                 if (aiCommandHandled) continue;
 
@@ -456,5 +464,3 @@ process.once('SIGTERM', () => {
 startBot().catch((error) => {
     console.error('Failed to start bot:', error);
 });
-
-

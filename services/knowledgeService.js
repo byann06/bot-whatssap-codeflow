@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-// const DEFAULT_MAX_CONTEXT_CHARS = 3500;
+const DEFAULT_MAX_CONTEXT_CHARS = 3500;
 const KEYWORD_ALIASES = {
     command: ['commands', 'menu', 'perintah', 'bot'],
     commands: ['command', 'menu', 'perintah', 'bot'],
@@ -223,6 +223,62 @@ function isCommandQuery(keywords) {
     return keywords.some((keyword) => ['command', 'commands', 'perintah', 'menu', 'fitur'].includes(keyword));
 }
 
+function searchKnowledgeSections(rootDir, keyword, options = {}) {
+    const limit = Number(options.limit || 5);
+    if (!rootDir || !fs.existsSync(rootDir)) return [];
+
+    const query = String(keyword || '').trim();
+    if (!query) return [];
+
+    const sections = loadKnowledgeSections(rootDir);
+    const keywords = extractSearchKeywords(query);
+    if (!sections.length || !keywords.length) return [];
+
+    return sections
+        .map((section) => ({
+            ...section,
+            score: scoreSection(section, keywords),
+            snippet: createSnippet(section.text, keywords, 120),
+        }))
+        .filter((section) => section.score > 0)
+        .sort((a, b) => b.score - a.score || a.source.localeCompare(b.source))
+        .slice(0, limit)
+        .map((section) => ({
+            source: section.source,
+            title: section.title,
+            snippet: section.snippet,
+            score: section.score,
+        }));
+}
+
+function extractSearchKeywords(keyword) {
+    return String(keyword || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9@._-]+/g, ' ')
+        .split(/\s+/)
+        .map((word) => word.trim())
+        .filter((word) => word.length >= 2);
+}
+
+function createSnippet(text, keywords, maxLength = 120) {
+    const cleanText = String(text || '')
+        .replace(/^#{1,6}\s+/gm, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!cleanText) return '';
+
+    const lowerText = cleanText.toLowerCase();
+    const firstIndex = keywords
+        .map((keyword) => lowerText.indexOf(keyword))
+        .filter((index) => index >= 0)
+        .sort((a, b) => a - b)[0] ?? 0;
+    const start = Math.max(0, firstIndex - 30);
+    let snippet = cleanText.slice(start, start + maxLength).trim();
+
+    if (start > 0) snippet = `...${snippet}`;
+    if (start + maxLength < cleanText.length) snippet += '...';
+    return snippet;
+}
 function buildContext(sections, maxChars) {
     const blocks = [];
     let used = 0;
@@ -277,6 +333,8 @@ module.exports = {
     loadKnowledgeSections,
     extractKeywords,
     scoreSection,
+    searchKnowledgeSections,
+    createSnippet,
     isCommandQuery,
     isCommandOverviewQuery,
     buildCommandOverview,

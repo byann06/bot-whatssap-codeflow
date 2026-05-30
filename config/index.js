@@ -1,4 +1,4 @@
-require('dotenv').config();
+﻿require('dotenv').config();
 const path = require('path');
 const { YANVERSE_SYSTEM_PROMPT } = require('../services/ai/persona');
 
@@ -32,11 +32,22 @@ module.exports = {
         komunikasiLid: csvEnv('KOMUNIKASI_LID'),
         pemateriLid: csvEnv('PEMATERI_LID'),
     },
-    botNoticeGroupId: process.env.BOT_NOTICE_GROUP_ID || '120363427721474222@g.us',
+    botNoticeGroupId: process.env.BOT_NOTICE_GROUP_ID || '',
     messageMaxAgeSeconds: Number(process.env.BOT_MAX_MESSAGE_AGE_SECONDS || 120),
     maintenance: {
         startGifUrl: process.env.MAINTENANCE_GIF_URL || 'https://media.giphy.com/media/KQoQzycVECd9xUNpeP/giphy.mp4',
         doneGifUrl: process.env.MAINTENANCE_DONE_GIF_URL || 'https://media.giphy.com/media/ymjrojYpcJSMpZ9wRA/giphy.mp4',
+    },
+    googleSheets: {
+        credentialsPath: process.env.GOOGLE_SHEETS_CREDENTIALS_PATH || '',
+        spreadsheetId: process.env.GOOGLE_SHEETS_ADMIN_SPREADSHEET_ID || '',
+        adminSpreadsheetId: process.env.GOOGLE_SHEETS_ADMIN_SPREADSHEET_ID || '',
+        mainCashRange: process.env.GOOGLE_SHEETS_MAIN_CASH_RANGE || "'KAS  UTAMA'!A:Z",
+        memberCashRange: process.env.GOOGLE_SHEETS_MEMBER_CASH_RANGE || "'KAS ANGGOTA MINGGU 1'!A:Z",
+        memberCashRanges: csvEnv('GOOGLE_SHEETS_MEMBER_CASH_RANGES'),
+        inventorySpreadsheetId: process.env.GOOGLE_SHEETS_INVENTORY_SPREADSHEET_ID || process.env.GOOGLE_SHEETS_ADMIN_SPREADSHEET_ID || '',
+        inventoryRange: process.env.GOOGLE_SHEETS_INVENTORY_RANGE || "'Sheet Peminjaman'!A:Z",
+        inventoryRanges: csvEnv('GOOGLE_SHEETS_INVENTORY_RANGES'),
     },
     ai: {
         provider: (process.env.AI_PROVIDER || 'gemini').trim().toLowerCase(),
@@ -68,3 +79,4 @@ module.exports = {
     allowedRoles: ['Anggota', 'Pengurus'],
     allowedManagementRoles: ['Pembina', 'Ketua', 'Wakil Ketua', 'Sekretaris', 'Bendahara', 'Divisi Medig', 'Divisi Perlog', '-'],
 };
+
