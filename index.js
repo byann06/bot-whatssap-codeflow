@@ -12,6 +12,8 @@ const { handleMessage } = require('./handlers/menu');
 const { handleAICommand } = require('./handlers/aiCommandHandler');
 const { handleKnowledgeCommand } = require('./handlers/knowledgeCommandHandler');
 const { handleAdminSheetsCommand } = require('./handlers/adminSheetsCommandHandler');
+const { handleBotStatusCommand } = require('./handlers/botStatusCommandHandler');
+const { handleHelpCommand } = require('./handlers/helpCommandHandler');
 const { handleAIMessage } = require('./handlers/aiMessageHandler');
 const fs = require('fs');
 const config = require('./config');
@@ -434,6 +436,12 @@ async function startBot() {
             }
 
             try {
+                const helpCommandHandled = await handleHelpCommand(sock, message, msgText);
+                if (helpCommandHandled) continue;
+
+                const botStatusCommandHandled = await handleBotStatusCommand(sock, message, msgText);
+                if (botStatusCommandHandled) continue;
+
                 const adminSheetsCommandHandled = await handleAdminSheetsCommand(sock, message, msgText);
                 if (adminSheetsCommandHandled) continue;
 
