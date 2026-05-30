@@ -2,6 +2,11 @@ const config = require('../config');
 const { createAIService } = require('../services/aiService');
 const { createAIMemoryService } = require('../services/aiMemoryService');
 const { getAISettingsService } = require('./aiCommandHandler');
+const {
+    getAdminContextForAI,
+    detectAdminContextIntent,
+    getAdminContextAccessDenied,
+} = require('../services/adminContextService');
 
 const LEGACY_COMMANDS = [
     'menu',
@@ -87,11 +92,13 @@ async function handleAIMessage(sock, message) {
     try {
         await sendPresence(sock, chatId, 'composing');
         const history = memoryService.getHistory(chatId);
+        const adminContext = await resolveAdminContextForAI(sock, chatId, senderId, isGroup, promptText);
         const reply = await aiService.generateReply({
             text: promptText,
             senderId,
             chatId,
             history,
+            adminContext,
         });
 
         memoryService.addMessage(chatId, 'user', promptText);
@@ -164,6 +171,90 @@ function isCoolingDown(chatId) {
     return Date.now() - lastReplyAt < cooldownMs;
 }
 
+async function resolveAdminContextForAI(sock, chatId, senderId, isGroup, text) {
+    const intent = detectAdminContextIntent(text);
+    if (!intent) return '';
+
+    const logType = getAdminContextLogType(intent);
+    const allowed = await canUseAdminContext(sock, chatId, senderId, isGroup);
+    if (!allowed) {
+        logAdminContextAccess(getAdminContextDeniedLogType(intent), 'denied');
+        return getAdminContextAccessDenied();
+    }
+
+    logAdminContextAccess(logType, 'allowed');
+    return getAdminContextForAI(text);
+}
+
+function getAdminContextLogType(intent) {
+    const type = intent?.type || 'admin';
+    const labels = {
+        main_cash: 'kas_utama',
+        unpaid_cash: 'kas_belum_bayar',
+        member_cash_week: 'kas_minggu',
+        member_cash_status: 'kas_status',
+        inventory_status: 'infokus',
+        inventory_history: 'infokus_riwayat',
+    };
+
+    return labels[type] || 'admin';
+}
+
+function getAdminContextDeniedLogType(intent) {
+    const type = intent?.type || '';
+    if (type.startsWith('inventory_')) return 'infokus';
+    if (type.includes('cash') || type === 'main_cash' || type === 'unpaid_cash') return 'kas';
+    return 'admin';
+}
+
+function logAdminContextAccess(type, access) {
+    console.log(`[ADMIN_CONTEXT] type=${type} access=${access}`);
+}
+async function canUseAdminContext(sock, chatId, senderId, isGroup) {
+    if (isOwnerId(senderId)) return true;
+    if (!isGroup) return false;
+    return isGroupAdmin(sock, chatId, senderId);
+}
+
+async function isGroupAdmin(sock, groupId, senderId) {
+    try {
+        const metadata = await sock.groupMetadata(groupId);
+        const senderKeys = getComparableParticipantIds(senderId);
+        const participant = metadata.participants.find((item) => {
+            const ids = [item.id, item.jid, item.lid, item.phoneNumber]
+                .filter(Boolean)
+                .flatMap(getComparableParticipantIds);
+            return ids.some((id) => senderKeys.includes(id));
+        });
+
+        return participant?.admin === 'admin' || participant?.admin === 'superadmin';
+    } catch (error) {
+        console.error('[AI] failed to check admin context permission:', error.message);
+        return false;
+    }
+}
+
+function isOwnerId(senderId) {
+    const senderKeys = getComparableParticipantIds(senderId);
+    const ownerKeys = [
+        ...config.roles.adminLid,
+        ...config.roles.adminPhone,
+    ].flatMap(getComparableParticipantIds);
+
+    return senderKeys.some((id) => ownerKeys.includes(id));
+}
+
+function getComparableParticipantIds(value) {
+    const normalized = normalizeParticipantId(value);
+    const bare = normalized.replace(/@(s\.whatsapp\.net|lid)$/i, '');
+    return [normalized, bare].filter(Boolean);
+}
+
+function normalizeParticipantId(value) {
+    return String(value || '')
+        .replace(/:\d+(?=@)/, '')
+        .trim();
+}
 function splitCodeResponse(text) {
     const rawText = String(text || '').trim();
     const parts = [];
