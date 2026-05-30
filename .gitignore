@@ -8,3 +8,27 @@ data/
 bot.log
 bot.err.log
 token.json
+
+# Security baseline
+# Runtime / auth sessions
+baileys_auth/
+auth/
+auth_*/
+session/
+sessions/
+
+# Secrets / credentials
+.env.*
+!.env.example
+google-drive-token.json
+google-sheets-service-account.json
+
+# Runtime data / databases
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# Dependencies / logs
+logs/
+*.log
