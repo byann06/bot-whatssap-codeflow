@@ -1,6 +1,6 @@
 const config = require('../config');
 const { createAIService } = require('../services/aiService');
-const { createAIMemoryService } = require('../services/aiMemoryService');
+const { getAIMemoryService } = require('../services/aiMemoryService');
 const { getAISettingsService } = require('./aiCommandHandler');
 const {
     getAdminContextForAI,
@@ -60,9 +60,10 @@ const aiService = createAIService({
     knowledgeMaxContextChars: config.ai.knowledgeMaxContextChars,
     knowledgeMaxSections: config.ai.knowledgeMaxSections,
 });
-const memoryService = createAIMemoryService({
+const memoryService = getAIMemoryService({
     maxMessages: config.ai.memoryMaxMessages,
     maxChars: config.ai.memoryMaxChars,
+    databasePath: config.ai.databasePath,
 });
 
 async function handleAIMessage(sock, message) {
@@ -101,8 +102,10 @@ async function handleAIMessage(sock, message) {
             adminContext,
         });
 
-        memoryService.addMessage(chatId, 'user', promptText);
-        memoryService.addMessage(chatId, 'assistant', reply);
+        if (!adminContext) {
+            memoryService.addMessage(chatId, senderId, 'user', promptText);
+            memoryService.addMessage(chatId, 'bot', 'assistant', reply);
+        }
 
         await sendAIReply(sock, chatId, reply, message, promptText);
         return true;

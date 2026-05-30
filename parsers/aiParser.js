@@ -1,5 +1,10 @@
 function parseAICommand(text) {
-    const match = String(text || '').trim().match(/^\.ai\s+(on|off)$/i);
+    const normalized = String(text || '').trim();
+    if (/^\.ai\s+memory\s+clear$/i.test(normalized)) {
+        return { action: 'memory_clear' };
+    }
+
+    const match = normalized.match(/^\.ai\s+(on|off)$/i);
     if (!match) return null;
 
     return {

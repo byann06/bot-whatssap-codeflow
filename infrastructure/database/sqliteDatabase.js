@@ -52,6 +52,21 @@ function initSchema(db) {
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS ai_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT NOT NULL,
+            sender_id TEXT,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ai_messages_chat_id
+            ON ai_messages(chat_id);
+
+        CREATE INDEX IF NOT EXISTS idx_ai_messages_created_at
+            ON ai_messages(created_at);
     `);
 }
 

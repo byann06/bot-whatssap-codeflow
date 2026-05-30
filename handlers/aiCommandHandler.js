@@ -2,6 +2,7 @@ const config = require('../config');
 const { parseAICommand } = require('../parsers/aiParser');
 const { createSqliteDatabase } = require('../infrastructure/database/sqliteDatabase');
 const { createAISettingsService } = require('../services/aiSettingsService');
+const { getAIMemoryService } = require('../services/aiMemoryService');
 
 let databaseInstance = null;
 let settingsService = null;
@@ -23,10 +24,28 @@ async function handleAICommand(sock, message, text) {
     const senderId = message.key.participant || chatId;
     const isGroup = chatId.endsWith('@g.us');
 
+    if (command.action === 'memory_clear') {
+        if (isGroup) {
+            const isAdmin = isOwnerId(senderId) || await isGroupAdmin(sock, chatId, senderId);
+            if (!isAdmin) {
+                await reply(sock, message, 'Command `.ai memory clear` hanya bisa digunakan admin grup atau owner.');
+                return true;
+            }
+        }
+
+        getAIMemoryService({
+            maxMessages: config.ai.memoryMaxMessages,
+            maxChars: config.ai.memoryMaxChars,
+            databasePath: config.ai.databasePath,
+        }).clearHistory(chatId);
+        await reply(sock, message, 'Memory Yanverse untuk chat ini sudah dibersihkan.');
+        return true;
+    }
+
     if (isGroup) {
-        const isAdmin = await isGroupAdmin(sock, chatId, senderId);
+        const isAdmin = isOwnerId(senderId) || await isGroupAdmin(sock, chatId, senderId);
         if (!isAdmin) {
-            await reply(sock, message, 'Command `.ai on/off` hanya bisa digunakan admin grup.');
+            await reply(sock, message, 'Command `.ai on/off` hanya bisa digunakan admin grup atau owner.');
             return true;
         }
 
@@ -60,6 +79,22 @@ async function isGroupAdmin(sock, groupId, senderId) {
         console.error('Failed to check group admin for AI command:', error.message);
         return false;
     }
+}
+
+function isOwnerId(senderId) {
+    const senderKeys = getComparableParticipantIds(senderId);
+    const ownerKeys = [
+        ...config.roles.adminLid,
+        ...config.roles.adminPhone,
+    ].flatMap(getComparableParticipantIds);
+
+    return senderKeys.some((id) => ownerKeys.includes(id));
+}
+
+function getComparableParticipantIds(value) {
+    const normalized = normalizeParticipantId(value);
+    const bare = normalized.replace(/@(s\.whatsapp\.net|lid)$/i, '');
+    return [normalized, bare].filter(Boolean);
 }
 
 function normalizeParticipantId(value) {
