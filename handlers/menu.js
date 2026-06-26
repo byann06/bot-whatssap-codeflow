@@ -1,24 +1,8 @@
-const fs = require('fs');
-const path = require('path');
-
-class MessageMedia {
-    static fromFilePath(filePath) {
-        const ext = path.extname(filePath).toLowerCase();
-        const mimeTypes = {
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.png': 'image/png',
-        };
-
-        return {
-            data: fs.readFileSync(filePath),
-            mimetype: mimeTypes[ext] || 'application/octet-stream',
-            filename: path.basename(filePath),
-        };
-    }
-}
-const pemateriData = require('../data/pemateri');
 const driveDocs = require('./drive');
+const { handleGeneralCommand } = require('./generalCommandHandler');
+const { handleFunCommand } = require('./funCommandHandler');
+const { handleRegistrationCommand, handleRegistrationConversation } = require('./registrationCommandHandler');
+const { handlePemateriCommand } = require('./pemateriCommandHandler');
 const { loadDocsState, listFoldersFromDrive, removeFolder, getMediaType, uploadMediaBatch } = driveDocs;
 const config = require('../config');
 const { loadMembers, saveMembers } = require('../repositories/members');
@@ -40,6 +24,15 @@ const {
     parseAttendanceReportCommand,
 } = require('../parsers/attendanceParser');
 const {
+    parseRegisterText,
+    parseAddCommand,
+} = require('../parsers/registrationParser');
+const {
+    parseDocumentationCommand,
+    isDocumentationUploadCommand,
+} = require('../parsers/documentationParser');
+const { parseAdminCommands } = require('../parsers/pemateriAdminParser');
+const {
     getAttendanceIdentity,
     getAttendanceMeta,
     getSessionExcuses,
@@ -58,129 +51,17 @@ const {
     formatScheduleList,
 } = require('../services/attendanceService');
 
-const MENU_TEXT = `
->>menu - melihat daftar perintah bot 
-
->>link - melihat link penting komunitas
-
->>info - melihat data akun anggota
-
->>daftar - mendaftarkan akun anggota baru
-
->>add - mengubah data diri yang sudah terdaftar
-
->>pemateri - melihat susunan pemateri kegiatan
-
->>jadwalku - melihat giliran kamu sebagai pemateri
-
->>logo - meminta file logo komunitas
-
->>create folder - membuat folder dokumentasi Google Drive
-
->>folder aktif - memilih folder dokumentasi aktif
-
->>share to discord - membagikan link dokumentasi ke Discord
-
->>sirpai - fitur fun untuk mention teman dengan foto sir-pai
-
->>hadir - mencatat kehadiran hari ini
-
->>daftar hadir - melihat rekap kehadiran hari ini
-
->>codeflowchallenge - melihat info challenge season 1
-
->>aspek penilaian - melihat aspek penilaian pemenang
-`;
-
-const LINK_KOMUNITAS = `
-*🌐 Link Komunitas CodeFlow Community*
-
-🔗 *WhatsApp Channel*
-👉 https://whatsapp.com/channel/0029Vb7I0E11HspvtixrkS06
-📌 Informasi, materi, tips, dan update seputar Web Development.
-
-💻 *GitHub*
-👉 https://github.com/CodeFlow-community
-📌 Repository kode program dan project komunitas.
-
-📚 *Pusat Literasi*
-👉 https://drive.google.com/drive/folders/1icdU9FwZnKRn3F9PkpPVHHd-A_vLEnK-
-📌 Perpustakaan digital CFC dan sumber literasi.
-
-🖼️ *Dokumentasi Kegiatan*
-👉 https://drive.google.com/drive/folders/14BkC8l8IG0rNrdTLWJTT-O6lMUjLRym2
-📌 Foto dan video kegiatan komunitas.
-
-🎮 *Discord*
-👉 https://discord.gg/XPKSHbtH
-📌 Diskusi, sharing, main game bareng, dan interaksi antaar anggota.
-
-🎵 *TikTok*
-👉 https://www.tiktok.com/@codeflowcom
-📌 Tips dan dokumentasi kegiatan dalam bentuk video.
-
-📸 *Instagram*
-👉 https://www.instagram.com/codeflowcom
-📌 Publikasi kegiatan dan dokumentasi visual komunitas.
-
-📚 *Materi Pembelajaran*
-👉 _(segera hadir)_
-📌 Materi pembelajaran mingguan.
-
-📊 *Laporan Kas*
-👉 _(segera hadir)_
-📌 Pemasukan dan pengeluaran kas komunitas secara transparan.
-`;
-
-const LOGO_EXTENSIONS = ['.jpg', '.jpeg', '.png'];
+const {
+    normalizePhone,
+    normalizeLid,
+    buildSenderIdentity,
+    findMemberEntriesByIdentity,
+} = require('../services/memberIdentityService');
+const {
+    isAdminUser,
+    hasLidRole,
+} = require('../services/permissionService');
 const AVAILABLE_COMMANDS = new Set(['menu', 'link', 'logo', 'drive auth', 'sirpai', 'info', 'daftar', 'pemateri', 'jadwalku', 'add', 'hadir', 'daftar hadir', 'codeflowchallenge', 'aspek penilaian', 'upin ipin', 'cek lid', 'min ukm di um apa aja ni?', 'folder list', 'jadwal absen', 'buat jadwal', 'liat jadwal', 'hapus jadwal', 'ubah jadwal', 'jam absen', 'close absen', 'buka absen', 'tutup absen', 'hapus hadir', 'izin', 'daftar izin']);
-const INFO_TEMPLATE = `
-*Informasi Akun Anggota*
->> Nama :
->> NPM :
->> Prodi :
->> Role : (Anggota/Pengurus)
->> Pengurus : (Pembina/Ketua/Wakil Ketua/Sekretaris/Bendahara/Divisi Medig/Divisi Perlog)
->> Berikan saran :
->> LID : 
-
-*Noted:*
-- Jika role kamu *Anggota*, isi bagian *Pengurus* dengan \`-\`
-- Jika role kamu *Pengurus*, isi sesuai jabatan
-`;
-const CODEFLOW_CHALLENGE_TEXT = `
-*CodeFlow Challenge*
-
-*Syarat Peserta:*
-1. Kehadiran >> minimal 90% dari total pertemuan season 1
-2. Uang Kas >> wajib melunasi sebelum season berakhir
-3. Jadi Pemateri >> setiap kelompok wajib tampil sesuai jadwal
-
-*3 Kategori Pemenang:*
-1. Best Pemateri
-2. Most Consistent
-3. Best Progress
-
-*Hadiah:*
->> 5% per 1 orang dari pemasukan uang kas dan pembulatan mata uang
->> Sertifikat dari Code Flow Community
-
-*Ketentuan Hadiah:*
->> Hadiah dapat berupa uang tunai atau barang sesuai kesepakatan
->> 1 orang maksimal bisa memenangkan 1 kategori
-
-Ketik *aspek penilaian* untuk melihat aspek penilaian pemenang.
-`;
-const ASPEK_PENILAIAN_TEXT = `
-*Aspek Penilaian Pemenang*
-
-Belum diinput
-`;
-const REGISTER_TEMPLATE = 'daftar | Nama Lengkap | NPM | Prodi | Role | Pengurus | Saran';
-const SIR_PAI_FILE = config.files.sirPai;
-const SIR_PAI_COOLDOWN_MS = 60 * 1000;
-const sirPaiCooldowns = new Map();
-const ADMIN_PHONE = config.roles.adminPhone;
 const ADMIN_LID = config.roles.adminLid;
 // Antrian upload media per admin
 const uploadQueue = new Map();
@@ -190,8 +71,6 @@ const HADIR_LID = config.roles.hadirLid;
 const DOKUMENTASI_LID = config.roles.dokumentasiLid;
 const KOMUNIKASI_LID = config.roles.komunikasiLid;
 const PEMATERI_LID = config.roles.pemateriLid;
-const ALLOWED_ROLE_VALUES = config.allowedRoles;
-const ALLOWED_MANAGEMENT_VALUES = config.allowedManagementRoles;
 const ATTENDANCE_SESSIONS_KEY = config.attendanceKeys.sessions;
 const ATTENDANCE_ACTIVE_KEY = config.attendanceKeys.activeByChat;
 const ATTENDANCE_REMINDER_MINUTES = config.attendanceReminderMinutes;
@@ -202,115 +81,9 @@ function getConversationKey(identity, chatId) {
     return normalizeLid(identity?.lid) || normalizePhone(identity?.phone) || chatId || 'unknown';
 }
 
-function splitCommaValues(value) {
-    return String(value || '').split(',').map((part) => part.trim()).filter(Boolean);
-}
-
-function parseRegisterText(rawBody) {
-    const text = String(rawBody || '').trim();
-    let payload = '';
-    if (/^daftar\s*\|/i.test(text)) {
-        return parseRegisterCommand(text);
-    }
-    if (/^daftar\s*:/i.test(text)) {
-        payload = text.replace(/^daftar\s*:/i, '').trim();
-    } else if (/^daftar\s*,/i.test(text)) {
-        payload = text.replace(/^daftar\s*,/i, '').trim();
-    } else if (/^daftar\s+/i.test(text)) {
-        payload = text.replace(/^daftar\s+/i, '').trim();
-    } else {
-        return null;
-    }
-
-    const data = {};
-    const aliases = {
-        nama: 'name', name: 'name', npm: 'npm', prodi: 'studyProgram', jurusan: 'studyProgram', role: 'role', pengurus: 'managementRole', jabatan: 'managementRole', saran: 'suggestion'
-    };
-    splitCommaValues(payload).forEach((segment) => {
-        const match = segment.match(/^([a-zA-Z]+)\s*[:=]?\s+(.+)$/);
-        if (!match) return;
-        const key = aliases[match[1].toLowerCase()];
-        if (key) data[key] = match[2].trim();
-    });
-
-    if (!Object.keys(data).length) return null;
-    return buildRegisterCommand(data);
-}
-
-function buildRegisterCommand(data) {
-    const name = String(data.name || '').trim();
-    const npm = String(data.npm || '').trim();
-    const studyProgram = String(data.studyProgram || '').trim();
-    const role = normalizeRole(data.role || 'Anggota');
-    const managementRole = normalizeManagementRole(data.managementRole || '-');
-    const suggestion = String(data.suggestion || '-').trim() || '-';
-
-    if (!name || !studyProgram) return { error: 'Nama dan prodi wajib diisi saat daftar.' };
-    if (!role) return { error: `Role hanya boleh *${ALLOWED_ROLE_VALUES.join('*, *')}*.` };
-    if (role === 'Pengurus') return { error: 'Pendaftaran sebagai *Pengurus* tidak bisa dilakukan lewat bot. Silakan hubungi admin untuk pendataan pengurus.' };
-    if (!managementRole) return { error: `Jabatan pengurus hanya boleh *${ALLOWED_MANAGEMENT_VALUES.join('*, *')}*.` };
-    if (managementRole !== '-') return { error: 'Maaf Daftar Data Hanya diKHUSUSkan untuk anggota. Isi pengurus dengan `-`.' };
-
-    return {
-        value: {
-            name,
-            npm: /^belum\s+diinput$/i.test(npm) ? '' : npm,
-            studyProgram,
-            role,
-            managementRole,
-            suggestion,
-        },
-    };
-}
-
 function logInteraction(type, details) {
     const timestamp = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
     console.log(`[${timestamp}] [${type}] ${details}`);
-}
-
-function normalizePhone(value) {
-    const digits = String(value || '').replace(/\D/g, '');
-    if (!digits) {
-        return '';
-    }
-
-    if (digits.startsWith('0')) {
-        return `62${digits.slice(1)}`;
-    }
-
-    if (digits.startsWith('8')) {
-        return `62${digits}`;
-    }
-
-    return digits;
-}
-
-function normalizeLid(value) {
-    const jid = String(value || '').trim();
-    return jid.endsWith('@lid') ? jid : '';
-}
-
-function normalizeNameKey(value) {
-    return String(value || '').trim().toLowerCase();
-}
-
-function normalizeRole(value) {
-    const normalizedValue = String(value || '').trim().toLowerCase();
-    if (normalizedValue === 'anggota') {
-        return 'Anggota';
-    }
-
-    if (normalizedValue === 'pengurus') {
-        return 'Pengurus';
-    }
-
-    return null;
-}
-
-function normalizeManagementRole(value) {
-    const normalizedValue = String(value || '').trim().toLowerCase();
-    const matchedValue = ALLOWED_MANAGEMENT_VALUES.find((item) => item.toLowerCase() === normalizedValue);
-    return matchedValue || null;
 }
 
 function scheduleAttendanceReminder(client, session, targetChatId) {
@@ -345,70 +118,6 @@ function scheduleAttendanceReminder(client, session, targetChatId) {
 
     attendanceReminderTimers.set(session.id, timer);
 }
-function parseDocumentationCommand(rawBody) {
-    const text = String(rawBody || '').trim();
-
-    if (/^drive\s+auth$/i.test(text)) {
-        return { type: 'drive_auth' };
-    }
-
-    const driveCodeMatch = text.match(/^drive\s+code\s+(.+)$/i);
-    if (driveCodeMatch) {
-        return { type: 'drive_code', code: driveCodeMatch[1].trim() };
-    }
-
-    const createMatch = text.match(/^create\s+folder\s+"([^"]+)"$/i);
-    if (createMatch) {
-        return { type: 'create_folder', name: createMatch[1].trim() };
-    }
-
-    const activeMatch = text.match(/^folder\s+aktif\s+"([^"]+)"$/i);
-    if (activeMatch) {
-        return { type: 'set_active_folder', name: activeMatch[1].trim() };
-    }
-
-    const shareMatch = text.match(/^share\s+"?(.+?)"?\s+to\s+discord$/i);
-    if (shareMatch) {
-        return { type: 'share_folder', name: shareMatch[1].trim() };
-    }
-    if (/^folder\s+list$/i.test(text)) {
-        return { type: 'list_folders' };
-    }
-
-    const removeFolderMatch = text.match(/^remove\s+folder\s+"([^"]+)"$/i);
-    if (removeFolderMatch) {
-        return { type: 'remove_folder', name: removeFolderMatch[1].trim() };
-    }
-
-    return null;
-}
-
-function isAdminUser(senderPhone, msg) {
-    if (ADMIN_PHONE.includes(normalizePhone(senderPhone))) {
-        return true;
-    }
-
-    const ids = [
-        msg?.author, msg?.from,
-        msg?.key?.remoteJid,
-        msg?.key?.participant
-    ]
-        .filter(Boolean)
-        .map(v => String(v).trim())
-
-    return ids.some(id => ADMIN_LID.includes(id));
-}
-
-function isDocumentationAdmin(senderPhone, msg) {
-    return isAdminUser(senderPhone, msg);
-
-}
-
-function hasLidRole(senderIdentity, ...lidLists) {
-    if (ADMIN_LID.includes(senderIdentity.lid)) return true;
-    return lidLists.some(list => list.includes(senderIdentity.lid));
-}
-
 function getUploadQueue(lid) {
     return uploadQueue.get(lid) || null;
 }
@@ -425,10 +134,6 @@ function clearUploadQueue(lid) {
 function setUploadQueue(lid, data) {
     uploadQueue.set(lid, data);
 }
-function isDocumentationUploadCommand(rawBody) {
-    return /^upload\s+(dokumentasi|docs?)$/i.test(String(rawBody || '').trim());
-}
-
 function getDriveErrorMessage(error) {
     const code = error?.message || '';
     const messages = {
@@ -506,184 +211,7 @@ async function replyToUser(msg, contact, senderName, text) {
     });
 }
 
-function getSirPaiTargets(msg, client) {
-    const botNumber = client?.info?.wid?._serialized || '';
-    const mentionedIds = (msg.mentionedIds || [])
-        .map((jid) => String(jid || '').replace(/@c\.us$/i, '@s.whatsapp.net'))
-        .filter(Boolean);
 
-    if (/^@\d+\s+/i.test(String(msg.body || '').trim()) && mentionedIds.length > 1) {
-        mentionedIds.shift();
-    }
-
-    return [...new Set(mentionedIds.filter((jid) => jid !== botNumber))];
-}
-
-function canUseSirPai(chatId, targetIds) {
-    const now = Date.now();
-    const key = `${chatId}:${targetIds.sort().join(',')}`;
-    const lastUsedAt = sirPaiCooldowns.get(key) || 0;
-
-    if (now - lastUsedAt < SIR_PAI_COOLDOWN_MS) {
-        const secondsLeft = Math.ceil((SIR_PAI_COOLDOWN_MS - (now - lastUsedAt)) / 1000);
-        return { allowed: false, secondsLeft };
-    }
-
-    sirPaiCooldowns.set(key, now);
-    return { allowed: true, secondsLeft: 0 };
-}
-
-async function sendSirPai(msg, client, targetIds) {
-    const image = fs.readFileSync(SIR_PAI_FILE);
-    const targetMentions = targetIds.map((jid) => `@${jid.split('@')[0]}`).join(' ');
-    return client.sock.sendMessage(msg.from, {
-        image,
-        caption: `${targetMentions}\n\nSir Pai telah turun tangan. This it SirPai Not KingPaaiii.`.trim(),
-        mentions: targetIds,
-    }, {
-        quoted: msg.key ? { key: msg.key, message: { conversation: msg.body || '' } } : undefined,
-    });
-}
-
-function formatPemateriSchedule() {
-    const sections = pemateriData.refreshScheduleReference().map((schedule) => {
-        const speakerLines = schedule.speakers
-            .map((speaker, index) => `${index + 1}. ${speaker.name || '-'}`)
-            .join('\n');
-
-        return `*Pertemuan ${schedule.week}:*\n${speakerLines}`;
-    });
-
-    return `*Susunan Pemateri Gen 2*\n\n${sections.join('\n\n')}`;
-}
-
-function formatMeetingForUser(schedule, lookupName) {
-    const normalizedLookupName = String(lookupName || '').trim().toLowerCase();
-    const lines = schedule.speakers.map((speaker, index) => {
-        const speakerName = String(speaker.name || '-').trim() || '-';
-        const isCurrentUser = speakerName.toLowerCase() === normalizedLookupName;
-        const displayName = isCurrentUser ? `*${speakerName}*` : speakerName;
-        return `${index + 1}. ${displayName}`;
-    });
-
-    return `Pertemuan ${schedule.week}:\n${lines.join('\n')}`;
-}
-
-function formatMemberInfo(member, index = null) {
-    const title = index ? `*Informasi Akun ${index}*` : '*Informasi Akun Anggota*';
-    return [
-        title,
-        `>> Nama : ${member.name || '-'}`,
-        `>> NPM : ${member.npm || '-'}`,
-        `>> Prodi : ${member.studyProgram || '-'}`,
-        `>> Role : ${member.role || '-'}`,
-        `>> Pengurus : ${member.managementRole || '-'}`,
-        `>> Nomor Untuk Dihubungi : ${member.phone || '-'}`,
-        `>> Berikan saran : ${member.suggestion || '-'}`,
-    ].join('\n');
-}
-
-function getLogoPaths() {
-    const assetsDir = path.join(__dirname, '..', 'assets','logo');
-    if (!fs.existsSync(assetsDir)) {
-        return [];
-    }
-
-    return fs.readdirSync(assetsDir)
-        .filter((fileName) => {
-            const normalizedExtension = path.extname(fileName).toLowerCase();
-            return LOGO_EXTENSIONS.includes(normalizedExtension);
-        })
-        .sort((firstFile, secondFile) => firstFile.localeCompare(secondFile))
-        .map((fileName) => path.join(assetsDir, fileName));
-}
-
-function getSenderPhone(contact, msg) {
-    const candidates = [
-        msg.author,
-        msg?.key?.participant,
-        contact?.id?._serialized,
-        msg.from,
-        msg?.key?.remoteJid,
-    ];
-
-    for (const candidate of candidates) {
-        const sourceId = String(candidate || '').trim();
-        if (!sourceId || sourceId.endsWith('@lid') || sourceId.endsWith('@g.us') || sourceId.endsWith('@newsletter')) {
-            continue;
-        }
-
-        const phone = normalizePhone(sourceId.split('@')[0]);
-        if (phone) {
-            return phone;
-        }
-    }
-
-    return '';
-}
-
-function getSenderLid(contact, msg) {
-    const candidates = [
-        msg.author,
-        msg.from,
-        msg?.key?.participant,
-        msg?.key?.remoteJid,
-        contact?.id?._serialized,
-    ];
-
-    for (const candidate of candidates) {
-        const lid = normalizeLid(candidate);
-        if (lid) {
-            return lid;
-        }
-    }
-
-    return '';
-}
-
-function buildSenderIdentity(contact, msg, senderName) {
-    return {
-        phone: getSenderPhone(contact, msg),
-        lid: getSenderLid(contact, msg),
-        names: [...new Set([
-            senderName,
-            contact?.pushname,
-            contact?.name,
-            msg.pushName,
-        ].map(normalizeNameKey).filter(Boolean))],
-    };
-}
-
-function findMembersByPhone(phone) {
-    const normalizedPhone = normalizePhone(phone);
-    return loadMembers().filter((member) => normalizePhone(member.phone) === normalizedPhone);
-}
-
-function findMemberEntriesByIdentity(identity, options = {}) {
-    const members = loadMembers();
-    const matches = new Map();
-    const phone = normalizePhone(identity?.phone);
-    const lid = normalizeLid(identity?.lid);
-    const names = Array.isArray(identity?.names) ? identity.names : [];
-
-    members.forEach((member, index) => {
-        if (phone && normalizePhone(member.phone) === phone) {
-            matches.set(index, { member, index });
-            return;
-        }
-
-        if (lid && normalizeLid(member.lid) === lid) {
-            matches.set(index, { member, index });
-            return;
-        }
-
-        if (options.allowNameFallback && names.includes(normalizeNameKey(member.name))) {
-            matches.set(index, { member, index });
-        }
-    });
-
-    return [...matches.values()];
-}
 
 function findMembersByIdentity(identity, options = {}) {
     const matchedEntries = findMemberEntriesByIdentity(identity, options);
@@ -732,289 +260,6 @@ function findPrimaryMemberByIdentity(identity, options = {}) {
 
     rememberSenderIdentity(matchedEntries[0].index, identity);
     return matchedEntries[0].member;
-}
-
-function findMemberByName(name) {
-    const normalizedName = String(name || '').trim().toLowerCase();
-    if (!normalizedName) {
-        return null;
-    }
-
-    return loadMembers().find((member) => String(member.name || '').trim().toLowerCase() === normalizedName) || null;
-}
-
-function parseAdminCommands(rawBody) {
-    const segments = String(rawBody || '')
-        .split(',')
-        .map((segment) => segment.trim())
-        .filter(Boolean);
-
-    if (segments.length === 0) {
-        return null;
-    }
-
-    const actions = [];
-
-    for (const segment of segments) {
-        const mentionMatch = segment.match(/^pemateri\s+(\d+)$/i);
-        if (mentionMatch) {
-            actions.push({
-                type: 'mention',
-                week: Number(mentionMatch[1]),
-            });
-            continue;
-        }
-
-        const forwardMatch = segment.match(/^kirim\s+to\s+pertemuan\s+(\d+)$/i);
-        if (forwardMatch) {
-            actions.push({
-                type: 'forward',
-                week: Number(forwardMatch[1]),
-            });
-            continue;
-        }
-
-        if (/^kirim\s+pesan$/i.test(segment)) {
-            actions.push({
-                type: 'forward',
-                week: null,
-                needsInheritedWeek: true,
-            });
-            continue;
-        }
-
-        const removeMatch = segment.match(/^remove\s+(.+)$/i);
-        if (removeMatch && !/^folder\s+/i.test(removeMatch[1])) {
-            actions.push({
-                type: 'remove',
-                name: removeMatch[1].replace(/^"|"$/g, '').trim(),
-            });
-            continue;
-        }
-
-        const changeMatch = segment.match(/^change\s+"?(.+?)"?\s+to\s+pertemuan\s+(\d+)\s+line\s+(\d+)$/i);
-        if (changeMatch) {
-            actions.push({
-                type: 'move',
-                name: changeMatch[1].trim(),
-                week: Number(changeMatch[2]),
-                line: Number(changeMatch[3]),
-            });
-            continue;
-        }
-
-        const addScheduleMatch = segment.match(/^add\s+"?(.+?)"?\s+to\s+pertemuan\s+(\d+)\s+line\s+(\d+)$/i);
-        if (addScheduleMatch) {
-            actions.push({
-                type: 'add_schedule',
-                name: addScheduleMatch[1].trim(),
-                week: Number(addScheduleMatch[2]),
-                line: Number(addScheduleMatch[3]),
-            });
-            continue;
-        }
-
-        const remindMatch = segment.match(/^ingatkan\s+pemateri\s+(\d+)$/i);
-        if (remindMatch) {
-            actions.push({
-                type: 'remind',
-                week: Number(remindMatch[1]),
-            });
-            continue;
-        }
-
-        return null;
-    }
-
-    return actions.length > 0 ? actions : null;
-}
-
-function getMemberChatId(member) {
-    const lid = normalizeLid(member?.lid);
-    if (lid) {
-        return lid;
-    }
-
-    const phone = normalizePhone(member?.phone);
-    return phone ? `${phone}@s.whatsapp.net` : '';
-}
-
-function getMentionLabel(chatId) {
-    return `@${String(chatId || '').split('@')[0]}`;
-}
-
-function buildAdminPemateriReply(schedule) {
-    const mentions = [];
-    const recipients = [];
-    const lines = schedule.speakers.map((speaker, index) => {
-        const member = findMemberByName(speaker.name);
-        const chatId = getMemberChatId(member);
-        if (chatId) {
-            mentions.push(chatId);
-            recipients.push({
-                name: member.name,
-                phone: normalizePhone(member.phone),
-                lid: normalizeLid(member.lid),
-                chatId,
-            });
-            return `${index + 1}. ${getMentionLabel(chatId)}`;
-        }
-
-        return `${index + 1}. ${speaker.name || '-'}`;
-    });
-
-    return {
-        text: `Pemateri Pertemuan ${schedule.week}:\n${lines.join('\n')}`,
-        mentions,
-        recipients,
-    };
-}
-
-function buildPemateriReminderText(recipientName, week) {
-    return [
-        `Halo ${recipientName},`,
-        `ini pengingat bahwa kamu terjadwal sebagai pemateri Pertemuan ${week} di Code Flow Community.`,
-        'Mohon pelajari materi yg sudah dikirim dan pantau grup untuk informasi lanjutan dari admin.',
-    ].join('\n');
-}
-
-function parseAddCommand(rawBody) {
-    const match = String(rawBody || '').trim().match(/^add\s+(\S+)\s+(.+)$/i);
-    if (!match) {
-        return null;
-    }
-
-    return {
-        field: match[1].toLowerCase(),
-        value: match[2].trim(),
-    };
-}
-
-function mapEditableField(field) {
-    const aliases = {
-        nama: 'name',
-        npm: 'npm',
-        prodi: 'studyProgram',
-        jurusan: 'studyProgram',
-        role: 'role',
-        pengurus: 'managementRole',
-        jabatan: 'managementRole',
-        saran: 'suggestion',
-        no: 'phone',
-        nomor: 'phone',
-        nowa: 'phone',
-        wa: 'phone',
-    };
-
-    return aliases[field] || null;
-}
-
-function validateMemberUpdate(field, value, currentMember) {
-    if (!value) {
-        return { error: 'Nilai baru tidak boleh kosong.' };
-    }
-
-    if (field === 'phone') {
-        const normalizedPhone = normalizePhone(value);
-        if (!normalizedPhone) {
-            return { error: 'Nomor WhatsApp tidak valid. Contoh: add no 628123456789.' };
-        }
-
-        return { value: normalizedPhone };
-    }
-
-    if (field === 'role') {
-        const normalizedRole = normalizeRole(value);
-        if (!normalizedRole) {
-            return { error: `Role hanya boleh *${ALLOWED_ROLE_VALUES.join('*, *')}*.` };
-        }
-
-        return { value: normalizedRole };
-    }
-
-    if (field === 'managementRole') {
-        const normalizedManagementRole = normalizeManagementRole(value);
-        if (!normalizedManagementRole) {
-            return { error: `Jabatan pengurus hanya boleh *${ALLOWED_MANAGEMENT_VALUES.join('*, *')}*.` };
-        }
-
-        if ((currentMember.role || '').toLowerCase() === 'anggota' && normalizedManagementRole !== '-') {
-            return { error: 'Maaf Pengurus Hanya Bisa di isi Jika Role Kamu pengurus.' };
-        }
-
-        return { value: normalizedManagementRole };
-    }
-
-    if (field === 'npm' && /^belum\s+diinput$/i.test(value)) {
-        return { value: '' };
-    }
-
-    return { value: value.trim() };
-}
-
-function parseRegisterCommand(rawBody) {
-    const registerMatch = String(rawBody || '').trim().match(/^daftar\s*\|(.+)$/i);
-    if (!registerMatch) {
-        return null;
-    }
-
-    const parts = registerMatch[1].split('|').map((part) => part.trim());
-    if (parts.length < 6) {
-        return { error: `format daftar belum lengkap. Gunakan:\n\`${REGISTER_TEMPLATE}\`` };
-    }
-
-    const [name, npm, studyProgram, role, managementRole, suggestion = '-'] = parts;
-    const normalizedRole = normalizeRole(role);
-    if (!normalizedRole) {
-        return { error: `Role hanya boleh *${ALLOWED_ROLE_VALUES.join('*, *')}*.` };
-    }
-
-    if (normalizedRole === 'Pengurus') {
-        return { error: 'Pendaftaran sebagai *Pengurus* tidak bisa dilakukan lewat bot. Silakan hubungi admin untuk pendataan pengurus.' };
-    }
-
-    const normalizedManagementRole = normalizeManagementRole(managementRole);
-    if (!normalizedManagementRole) {
-        return { error: `Jabatan pengurus hanya boleh *${ALLOWED_MANAGEMENT_VALUES.join('*, *')}*.` };
-    }
-
-    if (normalizedManagementRole !== '-') {
-        return { error: 'Maaf Daftar Data Hanya diKHUSUSkan untuk anggota .isi bidang Role Sebagai "Anggota", lalu kirimkan ulang format dengan benar.' };
-    }
-
-    if (!name || !studyProgram) {
-        return { error: 'Nama dan prodi wajib diisi saat daftar.' };
-    }
-
-    return {
-        value: {
-            name,
-            npm: /^belum\s+diinput$/i.test(npm) ? '' : npm,
-            studyProgram,
-            role: normalizedRole,
-            managementRole: normalizedManagementRole,
-            suggestion: suggestion || '-',
-        },
-    };
-}
-
-function completeRegistration(registerCommand, senderIdentity, senderPhone) {
-    if (!registerCommand) return { error: 'format daftar belum benar.' };
-    if (registerCommand.error) return { error: registerCommand.error };
-
-    const members = loadMembers();
-    const matchedIndexes = findMemberEntriesByIdentity(senderIdentity, { allowNameFallback: true });
-    if (matchedIndexes.length > 0) {
-        return { error: 'data kamu sudah terdaftar. Kalau mau koreksi data, gunakan command `add` atau cek dulu dengan `info`.' };
-    }
-
-    members.push({
-        phone: senderPhone,
-        ...(senderIdentity.lid && { lid: senderIdentity.lid }),
-        ...registerCommand.value,
-    });
-    saveMembers(members);
-    return { success: true };
 }
 
 function createScheduleFromData(data, chatId, senderName) {
@@ -1109,48 +354,19 @@ async function handleConversationReply(msg, contact, senderName, senderIdentity,
             return true;
         }
     }
-
     if (state.type === 'register') {
-        if (state.step === 'askMode') {
-            if (/^(lanjut|satu|satu satu|ya|y)$/i.test(text)) {
-                state.step = 'name';
-                await replyToUser(msg, contact, senderName, 'baik, tulis nama lengkap kamu.');
-                return true;
-            }
-            const parsed = parseRegisterText(`daftar ${text}`);
-            if (parsed) {
-                const result = completeRegistration(parsed, senderIdentity, senderPhone);
-                conversationStates.delete(key);
-                await replyToUser(msg, contact, senderName, result.error || 'pendaftaran berhasil disimpan. Sekarang kamu bisa ketik `info` untuk melihat data akunmu.');
-                return true;
-            }
-            await replyToUser(msg, contact, senderName, 'ketik `lanjut` untuk daftar satu-satu, atau kirim format lengkap dengan koma.');
-            return true;
-        }
-        const steps = ['name', 'npm', 'studyProgram', 'suggestion'];
-        if (steps.includes(state.step)) {
-            state.data[state.step] = text;
-            if (state.step === 'name') {
-                state.step = 'npm';
-                await replyToUser(msg, contact, senderName, 'tulis NPM kamu. Kalau belum ada, ketik `belum`.');
-                return true;
-            }
-            if (state.step === 'npm') {
-                state.step = 'studyProgram';
-                await replyToUser(msg, contact, senderName, 'tulis prodi kamu.');
-                return true;
-            }
-            if (state.step === 'studyProgram') {
-                state.step = 'suggestion';
-                await replyToUser(msg, contact, senderName, 'tulis saran/harapan kamu untuk komunitas. Kalau tidak ada, ketik `-`.');
-                return true;
-            }
-            const parsed = buildRegisterCommand({ ...state.data, role: 'Anggota', managementRole: '-' });
-            const result = completeRegistration(parsed, senderIdentity, senderPhone);
-            conversationStates.delete(key);
-            await replyToUser(msg, contact, senderName, result.error || 'pendaftaran berhasil disimpan. Sekarang kamu bisa ketik `info` untuk melihat data akunmu.');
-            return true;
-        }
+        return handleRegistrationConversation({
+            state,
+            stateKey: key,
+            msg,
+            contact,
+            senderName,
+            senderIdentity,
+            senderPhone,
+            rawBody,
+            conversationStates,
+            replyToUser,
+        });
     }
 
     return false;
@@ -1265,154 +481,8 @@ async function handleMessage(msg, client) {
     const shouldLogCommand = primaryCommand === 'documentation' || AVAILABLE_COMMANDS.has(primaryCommand) || Boolean(adminCommands) || documentationUploadCommand || Boolean(attendanceCommand);
     logInteraction('INCOMING', `${chatType} | chat=${from} | phone=${senderIdentity.phone || '-'} | lid=${senderIdentity.lid || '-'} | messageLength=${String(msg.body || '').length}${shouldLogCommand ? ` | command=${primaryCommand || '-'}` : ''}`);
 
-    if (hasLidRole(senderIdentity, KOMUNIKASI_LID, PEMATERI_LID) && adminCommands) {
-        const quotedMessage = msg.hasQuotedMsg ? await msg.getQuotedMessage().catch(() => null) : null;
-        const explicitWeeks = adminCommands
-            .map((action) => action.week)
-            .filter((week) => Number.isInteger(week) && week > 0);
-        const inheritedWeek = explicitWeeks.length > 0 ? explicitWeeks[0] : null;
-        const scheduleCache = new Map();
-
-        for (const action of adminCommands) {
-            // remove, move, add_schedule = hanya PEMATERI_LID atau ADMIN_LID
-            if (['remove', 'move', 'add_schedule'].includes(action.type) && !hasLidRole(senderIdentity, PEMATERI_LID)) {
-                await replyToUser(msg, contact, senderName, 'command ini khusus admin pemateri.');
-                return;
-            }
-
-            // mention, forward, remind = hanya KOMUNIKASI_LID atau ADMIN_LID
-            if (['mention', 'forward', 'remind'].includes(action.type) && !hasLidRole(senderIdentity, KOMUNIKASI_LID)) {
-                await replyToUser(msg, contact, senderName, 'command ini khusus admin komunikasi.');
-                return;
-            }
-            if (action.type === 'remove') {
-                const removed = pemateriData.removeSpeakerByName(action.name);
-                if (!removed) {
-                    await replyToUser(msg, contact, senderName, `nama *${action.name}* tidak ditemukan di jadwal pemateri.`);
-                    return;
-                }
-
-                logInteraction('OUTGOING', `reply=admin_remove_pemateri | to=${senderName} | name=${removed.removedSpeaker.name} | week=${removed.week} | line=${removed.line}`);
-                await replyToUser(msg, contact, senderName, `nama *${removed.removedSpeaker.name}* berhasil dihapus dari Pertemuan ${removed.week} line ${removed.line}.`);
-                return;
-            }
-
-            const targetWeek = action.needsInheritedWeek ? inheritedWeek : action.week;
-            if (!Number.isInteger(targetWeek) || targetWeek <= 0) {
-                logInteraction('OUTGOING', `reply=admin_pemateri_missing_week | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, 'command admin belum lengkap. Gunakan `pemateri 2`, `kirim to pertemuan 2`, atau `pemateri 2, kirim pesan`.');
-                return;
-            }
-
-            if (!scheduleCache.has(targetWeek)) {
-                scheduleCache.set(targetWeek, pemateriData.findScheduleByWeek(targetWeek) || null);
-            }
-
-            const schedule = scheduleCache.get(targetWeek);
-            if (!schedule) {
-                logInteraction('OUTGOING', `reply=admin_pemateri_not_found | to=${senderName} | week=${targetWeek}`);
-                await replyToUser(msg, contact, senderName, `data pemateri untuk Pertemuan ${targetWeek} belum tersedia.`);
-                return;
-            }
-
-            const adminReply = buildAdminPemateriReply(schedule);
-
-            if (action.type === 'move') {
-                const moved = pemateriData.moveSpeakerByName(action.name, action.week, action.line);
-                if (!moved) {
-                    await replyToUser(msg, contact, senderName, `nama *${action.name}* tidak ditemukan di jadwal pemateri.`);
-                    return;
-                }
-
-                if (moved.error === 'invalid_target') {
-                    await replyToUser(msg, contact, senderName, 'tujuan perpindahan tidak valid. Contoh: `change "Abyan Ihza Pradipta" to pertemuan 6 line 1`.');
-                    return;
-                }
-
-                const swapNote = moved.swappedSpeaker ? ` Slot tujuan berisi *${moved.swappedSpeaker.name}* sehingga posisinya ditukar.` : '';
-                logInteraction('OUTGOING', `reply=admin_move_pemateri | to=${senderName} | name=${moved.movedSpeaker.name} | from_week=${moved.fromWeek} | from_line=${moved.fromLine} | to_week=${moved.toWeek} | to_line=${moved.toLine}`);
-                await replyToUser(msg, contact, senderName, `nama *${moved.movedSpeaker.name}* berhasil dipindahkan ke Pertemuan ${moved.toWeek} line ${moved.toLine}.${swapNote}`);
-                return;
-            }
-
-            if (action.type === 'add_schedule') {
-                const added = pemateriData.addSpeakerToSchedule(action.name, action.week, action.line);
-                if (added?.error === 'already_exists') {
-                    await replyToUser(msg, contact, senderName, `nama *${action.name}* sudah ada di jadwal. Gunakan command \`change\` kalau mau memindahkan.`);
-                    return;
-                }
-
-                if (added?.error === 'slot_filled') {
-                    await replyToUser(msg, contact, senderName, `Pertemuan ${action.week} line ${action.line} sudah terisi *${added.speaker.name || '-'}*.`);
-                    return;
-                }
-
-                if (added?.error === 'invalid_target' || !added) {
-                    await replyToUser(msg, contact, senderName, 'tujuan penambahan tidak valid. Contoh: `add "Jamal" to pertemuan 10 line 3`.');
-                    return;
-                }
-
-                logInteraction('OUTGOING', `reply=admin_add_pemateri | to=${senderName} | name=${added.addedSpeaker.name} | week=${added.week} | line=${added.line}`);
-                await replyToUser(msg, contact, senderName, `nama *${added.addedSpeaker.name}* berhasil ditambahkan ke Pertemuan ${added.week} line ${added.line}.`);
-                return;
-            }
-
-
-            if (action.type === 'remind') {
-                if (adminReply.recipients.length === 0) {
-                    await replyToUser(msg, contact, senderName, `belum ada pemateri yang bisa diingatkan untuk Pertemuan ${schedule.week}. Pastikan data anggota mereka sudah terdaftar.`);
-                    return;
-                }
-
-                for (const recipient of adminReply.recipients) {
-                    await client.sock.sendMessage(recipient.chatId, {
-                        text: buildPemateriReminderText(recipient.name, schedule.week),
-                    });
-                    logInteraction('OUTGOING', `reply=admin_remind_pemateri | to=${recipient.name} | phone=${recipient.phone} | week=${schedule.week}`);
-                }
-
-                await msg.reply(`pengingat sudah dikirim. silahkan ${adminReply.mentions.map((mentionId) => `@${mentionId.split('@')[0]}`).join(' ')} cek pesan!`, undefined, {
-                    mentions: adminReply.mentions,
-                });
-                return;
-            }
-            if (action.type === 'mention') {
-                logInteraction('OUTGOING', `reply=admin_pemateri | to=${senderName} | week=${schedule.week}`);
-                if (quotedMessage) {
-                    await quotedMessage.reply(adminReply.text, undefined, {
-                        mentions: adminReply.mentions,
-                    });
-                } else {
-                    await msg.reply(adminReply.text, undefined, {
-                        mentions: adminReply.mentions,
-                    });
-                }
-                continue;
-            }
-
-            if (!quotedMessage) {
-                logInteraction('OUTGOING', `reply=admin_forward_requires_quote | to=${senderName} | week=${schedule.week}`);
-                await replyToUser(msg, contact, senderName, `untuk mengirim pesan ke pemateri Pertemuan ${schedule.week}, reply dulu pesan atau file yang mau diteruskan.`);
-                return;
-            }
-
-            for (const recipient of adminReply.recipients) {
-                await quotedMessage.forward(recipient.chatId);
-                logInteraction('OUTGOING', `forward=admin_pemateri_material | to=${recipient.name} | phone=${recipient.phone} | week=${schedule.week}`);
-            }
-
-            logInteraction('OUTGOING', `reply=admin_forward_success | to=${senderName} | week=${schedule.week} | total=${adminReply.recipients.length}`);
-            await msg.reply(`pesan berhasil diteruskan . silahkan ${adminReply.mentions.map((mentionId) => `@${mentionId.split('@')[0]}`).join(' ')} cek pesan!`, undefined, {
-                mentions: adminReply.mentions,
-            });
-        }
-
-        return;
-    }
-
     if (adminCommands) {
-        logInteraction('OUTGOING', `reply=admin_only_command_blocked | to=${senderName}`);
-        await replyToUser(msg, contact, senderName, 'command ini khusus admin tidak bisa digunakan.');
+        await handlePemateriCommand({ msg, client, contact, senderName, senderIdentity, adminCommands, hasLidRole, komunikasiLid: KOMUNIKASI_LID, pemateriLid: PEMATERI_LID, logInteraction, replyToUser });
         return;
     }
 
@@ -1770,8 +840,7 @@ async function handleMessage(msg, client) {
             break;
         }
         case 'menu':
-            logInteraction('OUTGOING', `reply=menu | to=${senderName}`);
-            await replyToUser(msg, contact, senderName, MENU_TEXT);
+            await handleGeneralCommand({ command: primaryCommand, msg, contact, senderName, logInteraction, replyToUser, getMentionHandle, getMentionTargets });
             break;
 
         case 'hadir': {
@@ -1850,192 +919,45 @@ async function handleMessage(msg, client) {
             await replyToUser(msg, contact, senderName, formatAttendanceReport(attendanceReportCommand.dateKey));
             break;
         }
-
         case 'link':
-            logInteraction('OUTGOING', `reply=link | to=${senderName}`);
-            await replyToUser(msg, contact, senderName, `berikut link komunitas CFC:\n\n${LINK_KOMUNITAS}`);
+            await handleGeneralCommand({ command: primaryCommand, msg, contact, senderName, logInteraction, replyToUser, getMentionHandle, getMentionTargets });
             break;
-
         case 'info': {
-            logInteraction('OUTGOING', `reply=info | to=${senderName}`);
-            const matchedMembers = findMembersByIdentity(senderIdentity, { allowNameFallback: true });
-
-            if (matchedMembers.length === 0) {
-                await replyToUser(msg, contact, senderName, `data kamu belum terdaftar di sistem bot. Silakan daftar dulu dengan format:\n\`${REGISTER_TEMPLATE}\`\n\nContoh:\n\`daftar | ${senderName} | Belum Diinput | Sistem Informasi | Anggota | - | Ingin ikut aktif\``);
-                break;
-            }
-
-            const memberSections = matchedMembers
-                .map((member, index) => formatMemberInfo(member, matchedMembers.length > 1 ? index + 1 : null))
-                .join('\n\n');
-
-            const duplicateNote = matchedMembers.length > 1
-                ? '\n\n*Noted:* nomor ini terhubung ke lebih dari satu profil. Tolong hubungi admin untuk merapikan data duplikat sebelum memakai command `add`.'
-                : '';
-
-            await replyToUser(msg, contact, senderName, `${memberSections}`);
+            await handleRegistrationCommand({ command: primaryCommand, msg, contact, senderName, senderIdentity, senderPhone, from, registerCommand, addCommand, conversationStates, getConversationKey, findMembersByIdentity, logInteraction, replyToUser });
             break;
         }
-
         case 'daftar': {
-            if (!registerCommand) {
-                conversationStates.set(getConversationKey(senderIdentity, from), { type: 'register', step: 'askMode', data: {} });
-                logInteraction('OUTGOING', `reply=register_prompt | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, 'kamu bisa daftar sekali ketik dengan format:\n\n```\ndaftar\nnama [namaKamu],\nnpm [npmKamu],\nprodi [prodiKamu],\nsaran [saranKamu]\n```\n\nAtau lanjut satu-satu, ketik:\n`lanjut`\n\nnanti saya arahkan😊.');
-                break;
-            }
-
-            const result = completeRegistration(registerCommand, senderIdentity, senderPhone);
-            if (result.error) {
-                logInteraction('OUTGOING', `reply=register_error | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, result.error);
-                break;
-            }
-
-            logInteraction('OUTGOING', `reply=register_success | to=${senderName}`);
-            await replyToUser(msg, contact, senderName, 'pendaftaran berhasil disimpan. Sekarang kamu bisa ketik `info` untuk melihat data akunmu.');
+            await handleRegistrationCommand({ command: primaryCommand, msg, contact, senderName, senderIdentity, senderPhone, from, registerCommand, addCommand, conversationStates, getConversationKey, findMembersByIdentity, logInteraction, replyToUser });
             break;
         }
         case 'pemateri':
-            logInteraction('OUTGOING', `reply=pemateri | to=${senderName}`);
-            await replyToUser(msg, contact, senderName, `berikut susunan pemateri kegiatan rutin:\n\n${formatPemateriSchedule()}`);
+            await handlePemateriCommand({ command: primaryCommand, msg, contact, senderName, senderIdentity, findPrimaryMemberByIdentity, logInteraction, replyToUser });
             break;
-
         case 'codeflowchallenge':
-            logInteraction('OUTGOING', `reply=codeflowchallenge | to=${senderName}`);
-            await replyToUser(msg, contact, senderName, CODEFLOW_CHALLENGE_TEXT);
+            await handleGeneralCommand({ command: primaryCommand, msg, contact, senderName, logInteraction, replyToUser, getMentionHandle, getMentionTargets });
             break;
-
         case 'aspek penilaian':
-            logInteraction('OUTGOING', `reply=aspek_penilaian | to=${senderName}`);
-            await replyToUser(msg, contact, senderName, ASPEK_PENILAIAN_TEXT);
+            await handleGeneralCommand({ command: primaryCommand, msg, contact, senderName, logInteraction, replyToUser, getMentionHandle, getMentionTargets });
             break;
-
         case 'jadwalku': {
-            pemateriData.refreshScheduleReference();
-            const memberProfile = findPrimaryMemberByIdentity(senderIdentity, { allowNameFallback: true });
-            const lookupName = memberProfile?.name || senderName;
-            const schedule = pemateriData.findSpeakerSchedule(lookupName);
-            if (!schedule) {
-                logInteraction('OUTGOING', `reply=jadwalku_not_found | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, 'jadwal pemateri kamu belum terdaftar. Nanti tinggal isi data nama kamu di file jadwal pemateri.');
-                break;
-            }
-
-            logInteraction('OUTGOING', `reply=jadwalku | to=${senderName} | week=${schedule.week} | order=${schedule.order}`);
-            await replyToUser(msg, contact, senderName, formatMeetingForUser(schedule, lookupName));
+            await handlePemateriCommand({ command: primaryCommand, msg, contact, senderName, senderIdentity, findPrimaryMemberByIdentity, logInteraction, replyToUser });
             break;
         }
-
         case 'add': {
-            if (!addCommand) {
-                logInteraction('OUTGOING', `reply=add_invalid_format | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, 'format command belum benar. Contoh:\n`add npm 24042231035`\n`add no 628123456789`\n`add prodi Sistem Informasi`\n`add saran Perbanyak kegiatan rutin`');
-                break;
-            }
-
-            const editableField = mapEditableField(addCommand.field);
-            if (!editableField) {
-                logInteraction('OUTGOING', `reply=add_invalid_field | to=${senderName} | field=${addCommand.field}`);
-                await replyToUser(msg, contact, senderName, 'field yang bisa diubah: `nama`, `npm`, `prodi`, `role`, `pengurus`, `saran`, `no`.');
-                break;
-            }
-
-            const members = loadMembers();
-            const matchedIndexes = findMemberEntriesByIdentity(senderIdentity, { allowNameFallback: true });
-
-            if (matchedIndexes.length === 0) {
-                logInteraction('OUTGOING', `reply=add_not_found | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, 'data kamu belum ditemukan, jadi belum bisa diubah lewat command `add`.');
-                break;
-            }
-
-            if (matchedIndexes.length > 1) {
-                logInteraction('OUTGOING', `reply=add_duplicate_phone | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, 'nomor kamu terhubung ke lebih dari satu profil. Demi keamanan, command `add` dinonaktifkan dulu untuk nomor ini sampai data dirapikan admin.');
-                break;
-            }
-
-            const { index, member } = matchedIndexes[0];
-            const validationResult = validateMemberUpdate(editableField, addCommand.value, member);
-            if (validationResult.error) {
-                logInteraction('OUTGOING', `reply=add_validation_error | to=${senderName} | field=${editableField}`);
-                await replyToUser(msg, contact, senderName, validationResult.error);
-                break;
-            }
-
-            members[index] = {
-                ...member,
-                [editableField]: validationResult.value,
-            };
-
-            if (editableField === 'role' && validationResult.value === 'Anggota') {
-                members[index].managementRole = '-';
-            }
-
-            saveMembers(members);
-            logInteraction('OUTGOING', `reply=add_success | to=${senderName} | field=${editableField}`);
-            await replyToUser(msg, contact, senderName, `data *${addCommand.field}* berhasil diperbarui menjadi *${validationResult.value || '-'}*.\nKetik *info* untuk melihat data terbaru kamu.`);
+            await handleRegistrationCommand({ command: primaryCommand, msg, contact, senderName, senderIdentity, senderPhone, from, registerCommand, addCommand, conversationStates, getConversationKey, findMembersByIdentity, logInteraction, replyToUser });
             break;
         }
 
         case 'sirpai': {
-            if (!fs.existsSync(SIR_PAI_FILE)) {
-                logInteraction('OUTGOING', `reply=sirpai_not_found | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, 'foto sir-pai belum ditemukan. Simpan file ke `assets/sir-pai.jpg` dulu ya.');
-                break;
-            }
-
-            const sirPaiTargets = isGroup
-                ? getSirPaiTargets(msg, client)
-                : senderPhone ? [`${senderPhone}@s.whatsapp.net`] : [];
-
-            if (isGroup && sirPaiTargets.length === 0) {
-                logInteraction('OUTGOING', `reply=sirpai_no_target | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, 'tag teman yang mau kena sir-pai. Contoh: `@bot sirpai @teman`');
-                break;
-            }
-
-            const cooldown = canUseSirPai(from, sirPaiTargets.length ? sirPaiTargets : [senderPhone || from]);
-            if (!cooldown.allowed) {
-                logInteraction('OUTGOING', `reply=sirpai_cooldown | to=${senderName} | wait=${cooldown.secondsLeft}`);
-                await replyToUser(msg, contact, senderName, `sir-pai lagi istirahat. Coba lagi ${cooldown.secondsLeft} detik lagi.`);
-                break;
-            }
-
-            logInteraction('OUTGOING', `reply=sirpai | to=${senderName} | targets=${sirPaiTargets.join(',') || senderPhone || from}`);
-            await sendSirPai(msg, client, sirPaiTargets);
+            await handleFunCommand({ command: primaryCommand, msg, client, contact, senderName, senderPhone, isGroup, from, logInteraction, replyToUser });
             break;
         }
-
         case 'logo': {
-            const logoPaths = getLogoPaths();
-
-            if (logoPaths.length === 0) {
-                logInteraction('OUTGOING', `reply=logo_not_found | to=${senderName}`);
-                await replyToUser(msg, contact, senderName, 'logo CFC belum tersedia. Simpan file logo ke folder assets dengan ekstensi .jpg, .jpeg, atau .png.');
-                break;
-            }
-
-            for (const logoPath of logoPaths) {
-                const media = MessageMedia.fromFilePath(logoPath);
-                logInteraction('OUTGOING', `reply=logo_document | to=${senderName} | file=${path.basename(logoPath)}`);
-                await msg.reply(media, undefined, {
-                    caption: `${getMentionHandle(contact, senderName)} 🖼️ ${path.basename(logoPath)}`,
-                    sendMediaAsDocument: true,
-                    filename: path.basename(logoPath),
-                    mentions: getMentionTargets(contact),
-                });
-            }
+            await handleGeneralCommand({ command: primaryCommand, msg, contact, senderName, logInteraction, replyToUser, getMentionHandle, getMentionTargets });
             break;
         }
         case 'upin ipin': {
-            const ipinNumber = '6283166111757@s.whatsapp.net';
-
-            await client.sock.sendMessage(msg.key.remoteJid, {
-                text: `Halo saye upin dan ini adik saye ipin! 🌙\n@${ipinNumber.split('@')[0]}`,
-                mentions: [ipinNumber]
-            });
+            await handleFunCommand({ command: primaryCommand, msg, client, contact, senderName, senderPhone, isGroup, from, logInteraction, replyToUser });
             break;
         }
         case 'cek lid': {
@@ -2083,17 +1005,7 @@ async function handleMessage(msg, client) {
             break;
         }
         case 'min ukm di um apa aja ni?': {
-            logInteraction('OUTGOING', `reply=ukm | to=${senderName}`);
-            await replyToUser(msg, contact, senderName,
-                `UKM di UM? Ini dia:\n\n` +
-                `MAPALA\n` +
-                `MENWA\n` +
-                `PENCAK SILAT\n` +
-                `SANGGAR SENI\n` +
-                `DKV\n` +
-                `PRAMUKA\n` +
-                `ROHIS`
-            );
+            await handleFunCommand({ command: primaryCommand, msg, client, contact, senderName, senderPhone, isGroup, from, logInteraction, replyToUser });
             break;
         }
         case 'reset': {
@@ -2169,18 +1081,3 @@ async function handleMessage(msg, client) {
 }
 
 module.exports = { handleMessage };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
