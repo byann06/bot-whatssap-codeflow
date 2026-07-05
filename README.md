@@ -32,6 +32,9 @@ Fitur utama yang sudah tersedia:
 - Maintenance summary system
 - Bot health check
 - Help command per segmen
+- Menu lengkap berbasis katalog command
+- PDF panduan command lengkap
+- Absensi dengan izin wajib alasan dan auto-close
 - Security notes dan backup notes
 
 ---
@@ -57,6 +60,98 @@ Prinsip utama project ini:
 Bot memakai Baileys untuk terhubung ke WhatsApp. Bot dapat menerima pesan grup/private, membaca command, membalas pesan, dan menjalankan fitur organisasi Code Flow.
 
 Fitur command lama tetap berjalan lewat handler utama, sementara fitur baru dipisahkan ke handler/service agar project lebih scalable.
+
+### Menu dan Panduan Command
+
+Bot memiliki menu command lengkap berbasis katalog terpusat di:
+
+```txt
+constants/commandCatalog.js
+```
+
+Command utama:
+
+```txt
+menu
+command
+commands
+panduan
+panduan bot
+```
+
+`menu` menampilkan daftar command berdasarkan kategori dan akses pengguna. Format menu dibuat agar mudah dibaca di WhatsApp:
+
+```txt
+*1. Umum Anggota* >> Akses: Semua anggota
+
+`menu` >> Melihat semua command bot yang sudah difilter per kategori.
+
+`command` >> Mengirim file PDF panduan lengkap command bot.
+
+_________________
+*2. Absen Anggota* >> Akses: Semua anggota
+
+`hadir` >> Mencatat kehadiran. Wajib dikirim di grup.
+```
+
+`command`, `commands`, `panduan`, dan `panduan bot` akan mengirim file PDF panduan lengkap sebagai dokumen WhatsApp.
+
+File PDF default:
+
+```txt
+docs/Panduan-Command-CodeFlow-Bot.pdf
+```
+
+PDF dibuat oleh service:
+
+```txt
+services/commandGuidePdfService.js
+```
+
+Catatan:
+
+- Menu WhatsApp dan PDF memakai katalog command yang sama.
+- Jika menambah command baru, update `constants/commandCatalog.js`.
+- PDF dapat digenerate ulang otomatis saat command panduan dipakai.
+
+### Absensi dan Izin
+
+Bot mendukung absensi kegiatan komunitas.
+
+Command anggota:
+
+```txt
+hadir
+izin, sakit
+izin ada urusan keluarga
+izin | sedang di rumah sakit
+```
+
+Aturan:
+
+- `hadir` wajib dikirim di grup saat sesi absen sedang dibuka.
+- `izin` boleh dikirim di grup atau private chat bot.
+- `izin` wajib menyertakan alasan.
+- Jika user mengirim `izin` tanpa alasan, bot akan memberi contoh format yang benar.
+
+Command admin hadir:
+
+```txt
+buat jadwal
+buat jadwal,21-05-2026,13.00-17.00,pertemuan ketiga
+liat jadwal
+ubah jadwal,1,jam,13.00
+close absen 17.00
+buka absen
+tutup absen
+daftar hadir
+daftar izin
+hapus hadir <nama>
+```
+
+Saat `buka absen`, bot akan mengingatkan anggota untuk melengkapi absen dan menjelaskan bahwa hadir wajib di grup sedangkan izin boleh di grup/private dengan alasan.
+
+Jika sesi memiliki jam tutup (`endTime`/`close absen`), bot akan menutup absen otomatis saat jam tersebut lewat. Timer auto-close juga dipulihkan saat bot restart selama masih ada sesi open.
 
 ### Yanverse AI Assistant
 
@@ -313,16 +408,23 @@ Contoh format aman:
 ```json
 {
   "enabled": true,
-  "version": "v2.0.0",
+  "version": "v2.1.0",
   "summary": [
-    "Menambahkan Google Sheets integration read-only untuk administrasi CFC",
-    "Menambahkan persistent memory Yanverse berbasis SQLite",
-    "Menambahkan command .bot status untuk health check sistem"
+    "Menambahkan menu lengkap berdasarkan kategori dan akses pengguna",
+    "Menambahkan command `command` untuk mengirim PDF panduan command lengkap",
+    "Menambahkan aturan izin wajib alasan dan hadir wajib di grup",
+    "Menambahkan auto-close absen berdasarkan jam tutup"
   ]
 }
 ```
 
 Saat bot masuk maintenance atau hidup kembali, bot dapat mengirim pesan maintenance ke grup notice yang dikonfigurasi.
+
+Notifikasi maintenance grup bisa dimatikan lewat:
+
+```txt
+MAINTENANCE_NOTICE_ENABLED=false
+```
 
 ### Bot Status
 
@@ -418,8 +520,9 @@ whatssap-web/
 Penjelasan folder/file:
 
 - `config/`: konfigurasi project dari environment variable.
+- `constants/`: katalog teks dan daftar command bot.
 - `handlers/`: handler command dan handler message seperti AI, knowledge, kas, infokus, help, dan status bot.
-- `services/`: service domain seperti AI, memory, Google Sheets, knowledge, attendance, maintenance, dan notification.
+- `services/`: service domain seperti AI, memory, Google Sheets, knowledge, attendance, maintenance, notification, dan generator PDF panduan command.
 - `parsers/`: parser command agar input user lebih mudah diproses.
 - `infrastructure/`: layer teknis seperti database SQLite.
 - `knowledge/`: knowledge base markdown untuk Yanverse.
@@ -858,8 +961,11 @@ Saran backup:
 Setelah deploy atau update fitur, test command berikut:
 
 ```txt
+menu
+command
 .bot status
 .help
+.help absen
 .knowledge stats
 .knowledge search medig
 .kas utama
@@ -872,12 +978,17 @@ Setelah deploy atau update fitur, test command berikut:
 yanverse, kamu siapa?
 yanverse, saldo kas utama sekarang berapa?
 .ai memory clear
+hadir
+izin, sakit
 ```
 
 Expected umum:
 
+- `menu` menampilkan command lengkap dengan format section dan command monospace.
+- `command` mengirim `Panduan-Command-CodeFlow-Bot.pdf` sebagai dokumen.
 - `.bot status` menampilkan status AI, SQLite, knowledge, Google Sheets config, dan runtime.
 - `.help` menampilkan daftar segmen bantuan.
+- `.help absen` menjelaskan hadir wajib di grup dan izin wajib alasan.
 - `.knowledge stats` menampilkan statistik knowledge base.
 - `.knowledge search medig` menampilkan hasil knowledge relevan jika ada.
 - `.kas utama` dan `.kas rekap` hanya bisa diakses admin/owner.
@@ -885,6 +996,8 @@ Expected umum:
 - `.ai on` mengaktifkan AI untuk chat/grup sesuai permission.
 - `yanverse, kamu siapa?` dijawab dengan identitas Yanverse.
 - `.ai memory clear` membersihkan memory chat tersebut.
+- `hadir` hanya berhasil jika dikirim di grup saat absen open.
+- `izin, sakit` bisa dicatat dari grup atau private chat bot.
 
 Test akses non-admin untuk data administrasi:
 
