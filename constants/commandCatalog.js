@@ -473,12 +473,16 @@ function formatCommandMenu() {
     ];
 
     COMMAND_CATEGORIES.forEach((category, categoryIndex) => {
-        lines.push(`*${categoryIndex + 1}. ${category.title}*`);
-        lines.push(`Akses: ${category.access}`);
+        if (categoryIndex > 0) {
+            lines.push('');
+            lines.push('_________________');
+        }
+
+        lines.push(`*${categoryIndex + 1}. ${category.title}* >> Akses: ${category.access}`);
         category.commands.forEach((item) => {
-            lines.push(`>>${item.command} - ${item.summary}`);
+            lines.push('');
+            lines.push(`\`${item.command}\` >> ${item.summary}`);
         });
-        lines.push('');
     });
 
     return lines.join('\n').trim();
