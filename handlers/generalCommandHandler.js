@@ -1,13 +1,18 @@
 const fs = require('fs');
 const path = require('path');
 const {
-    MENU_TEXT,
     LINK_KOMUNITAS,
     CODEFLOW_CHALLENGE_TEXT,
     ASPEK_PENILAIAN_TEXT,
 } = require('../constants/menuTexts');
+const {
+    formatCommandMenu,
+    getCommandGuideFileName,
+} = require('../constants/commandCatalog');
+const { ensureCommandGuidePdf } = require('../services/commandGuidePdfService');
 
 const LOGO_EXTENSIONS = ['.jpg', '.jpeg', '.png'];
+const COMMAND_GUIDE_COMMANDS = new Set(['command', 'commands', 'panduan', 'panduan bot']);
 
 class MessageMedia {
     static fromFilePath(filePath) {
@@ -16,6 +21,7 @@ class MessageMedia {
             '.jpg': 'image/jpeg',
             '.jpeg': 'image/jpeg',
             '.png': 'image/png',
+            '.pdf': 'application/pdf',
         };
 
         return {
@@ -31,6 +37,11 @@ async function handleGeneralCommand(context = {}) {
 
     if (command === 'menu') {
         await handleMenuCommand(context);
+        return true;
+    }
+
+    if (COMMAND_GUIDE_COMMANDS.has(command)) {
+        await handleCommandGuideCommand(context);
         return true;
     }
 
@@ -59,7 +70,19 @@ async function handleGeneralCommand(context = {}) {
 
 async function handleMenuCommand({ msg, contact, senderName, logInteraction, replyToUser }) {
     logInteraction('OUTGOING', `reply=menu | to=${senderName}`);
-    await replyToUser(msg, contact, senderName, MENU_TEXT);
+    await replyToUser(msg, contact, senderName, formatCommandMenu());
+}
+
+async function handleCommandGuideCommand({ msg, contact, senderName, logInteraction, getMentionHandle, getMentionTargets }) {
+    const pdfPath = ensureCommandGuidePdf();
+    const media = MessageMedia.fromFilePath(pdfPath);
+    logInteraction('OUTGOING', `reply=command_guide_pdf | to=${senderName} | file=${path.basename(pdfPath)}`);
+    await msg.reply(media, undefined, {
+        caption: `${getMentionHandle(contact, senderName)} ini PDF panduan lengkap command bot CodeFlow.`.trim(),
+        sendMediaAsDocument: true,
+        filename: getCommandGuideFileName(),
+        mentions: getMentionTargets(contact),
+    });
 }
 
 async function handleLinkCommand({ msg, contact, senderName, logInteraction, replyToUser }) {

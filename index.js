@@ -8,7 +8,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const path = require('path');
-const { handleMessage } = require('./handlers/menu');
+const { handleMessage, restoreAttendanceAutoCloseTimers } = require('./handlers/menu');
 const { handleAICommand } = require('./handlers/aiCommandHandler');
 const { handleKnowledgeCommand } = require('./handlers/knowledgeCommandHandler');
 const { handleAdminSheetsCommand } = require('./handlers/adminSheetsCommandHandler');
@@ -29,6 +29,7 @@ let shutdownNoticeSent = false;
 let skippedOldMessageLogCount = 0;
 
 async function notifyMaintenanceStart(reason = 'MAINTENCE') {
+    if (!config.maintenance.noticeEnabled) return;
     if (shutdownNoticeSent || !client.sock) return;
     shutdownNoticeSent = true;
     try {
@@ -381,7 +382,8 @@ async function startBot() {
         if (connection === 'open') {
             client.info.wid._serialized = normalizeJid(jidNormalizedUser(sock.user?.id || ''));
             console.log('✅ Bot siap!');
-            if (!startupNoticeSent) {
+            restoreAttendanceAutoCloseTimers(client);
+            if (config.maintenance.noticeEnabled && !startupNoticeSent) {
                 startupNoticeSent = true;
                 try {
                     await sendGroupNotice(sock, buildMaintenanceDoneText(), { gifUrl: config.maintenance.doneGifUrl });

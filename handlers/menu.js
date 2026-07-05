@@ -7,7 +7,6 @@ const { loadDocsState, listFoldersFromDrive, removeFolder, getMediaType, uploadM
 const config = require('../config');
 const { loadMembers, saveMembers } = require('../repositories/members');
 const { loadAttendance, saveAttendance } = require('../repositories/attendance');
-const { sendBotNotice } = require('../services/notification');
 const {
     getWibDateKey,
     getWibTimeLabel,
@@ -42,6 +41,7 @@ const {
     createAttendanceSession,
     openAttendanceSession,
     closeAttendanceSession,
+    closeAttendanceSessionById,
     recordAttendanceInSession,
     recordExcuseInSession,
     removeAttendanceFromSession,
@@ -56,12 +56,13 @@ const {
     normalizeLid,
     buildSenderIdentity,
     findMemberEntriesByIdentity,
+    getMemberChatId,
 } = require('../services/memberIdentityService');
 const {
     isAdminUser,
     hasLidRole,
 } = require('../services/permissionService');
-const AVAILABLE_COMMANDS = new Set(['menu', 'link', 'logo', 'drive auth', 'sirpai', 'info', 'daftar', 'pemateri', 'jadwalku', 'add', 'hadir', 'daftar hadir', 'codeflowchallenge', 'aspek penilaian', 'upin ipin', 'cek lid', 'min ukm di um apa aja ni?', 'folder list', 'jadwal absen', 'buat jadwal', 'liat jadwal', 'hapus jadwal', 'ubah jadwal', 'jam absen', 'close absen', 'buka absen', 'tutup absen', 'hapus hadir', 'izin', 'daftar izin']);
+const AVAILABLE_COMMANDS = new Set(['menu', 'command', 'commands', 'panduan', 'panduan bot', 'link', 'logo', 'drive auth', 'sirpai', 'info', 'daftar', 'pemateri', 'jadwalku', 'add', 'hadir', 'daftar hadir', 'codeflowchallenge', 'aspek penilaian', 'upin ipin', 'cek lid', 'min ukm di um apa aja ni?', 'folder list', 'jadwal absen', 'buat jadwal', 'liat jadwal', 'hapus jadwal', 'ubah jadwal', 'jam absen', 'close absen', 'buka absen', 'tutup absen', 'hapus hadir', 'izin', 'daftar izin']);
 const ADMIN_LID = config.roles.adminLid;
 // Antrian upload media per admin
 const uploadQueue = new Map();
@@ -75,6 +76,7 @@ const ATTENDANCE_SESSIONS_KEY = config.attendanceKeys.sessions;
 const ATTENDANCE_ACTIVE_KEY = config.attendanceKeys.activeByChat;
 const ATTENDANCE_REMINDER_MINUTES = config.attendanceReminderMinutes;
 const attendanceReminderTimers = new Map();
+const attendanceAutoCloseTimers = new Map();
 const conversationStates = new Map();
 
 function getConversationKey(identity, chatId) {
@@ -117,6 +119,106 @@ function scheduleAttendanceReminder(client, session, targetChatId) {
     }, delay);
 
     attendanceReminderTimers.set(session.id, timer);
+}
+
+function getSessionNoticeChatId(session, fallbackChatId = '') {
+    if (fallbackChatId && fallbackChatId !== 'global') return fallbackChatId;
+    if (session?.chatId && session.chatId !== 'global') return session.chatId;
+    return config.botNoticeGroupId || '';
+}
+
+function buildMemberMentionData() {
+    const mentions = [];
+    const seen = new Set();
+
+    for (const member of loadMembers()) {
+        const jid = getMemberChatId(member);
+        if (!jid || seen.has(jid)) continue;
+        seen.add(jid);
+        mentions.push(jid);
+    }
+
+    return {
+        mentions,
+        text: mentions.map((jid) => `@${jid.split('@')[0]}`).join(' '),
+    };
+}
+
+async function sendAttendanceOpenedNotice(client, targetChatId, session) {
+    if (!client?.sock || !targetChatId) return;
+
+    const { mentions, text: mentionText } = buildMemberMentionData();
+    const closeText = session.endTime ? `Batas absen: *${session.endTime.replace(':', '.')} WIB*.` : '';
+    const text = [
+        '*Absen Dibuka*',
+        '',
+        mentionText,
+        '',
+        `Absen untuk *${getSessionTitle(session)}* sudah dibuka.`,
+        '',
+        'Mohon semua anggota melengkapi absen.',
+        'Hadir wajib dilakukan di grup dengan command:',
+        '`hadir`',
+        '',
+        'Izin boleh dilakukan di grup atau chat pribadi bot, tapi wajib menyertakan alasan.',
+        'Contoh:',
+        '`izin, sakit`',
+        '`izin, ada urusan keluarga`',
+        closeText,
+    ].filter((line) => line !== '').join('\n');
+
+    await client.sock.sendMessage(targetChatId, { text, mentions });
+}
+
+function clearAttendanceAutoClose(sessionId) {
+    const timer = attendanceAutoCloseTimers.get(sessionId);
+    if (timer) clearTimeout(timer);
+    attendanceAutoCloseTimers.delete(sessionId);
+}
+
+async function sendAttendanceClosedNotice(client, targetChatId, session, isAutomatic = false) {
+    if (!client?.sock || !targetChatId || !session) return;
+    const title = isAutomatic ? '*Absen Ditutup Otomatis*' : '*Absen Ditutup*';
+    await client.sock.sendMessage(targetChatId, {
+        text: `${title}\n\nAbsen untuk jadwal *${getSessionTitle(session)}* telah ditutup.\n\n${formatAttendanceSessionReport(session)}`,
+    });
+}
+
+function scheduleAttendanceAutoClose(client, session, targetChatId) {
+    if (!client?.sock || !session?.id || session.status !== 'open' || !session.endTime) return;
+
+    clearAttendanceAutoClose(session.id);
+
+    const closesAt = parseWibDateTime(session.dateKey, session.endTime);
+    if (!closesAt) return;
+
+    const delay = Math.max(0, closesAt.getTime() - Date.now());
+    const timer = setTimeout(async () => {
+        attendanceAutoCloseTimers.delete(session.id);
+        try {
+            const closedSession = closeAttendanceSessionById(session.id);
+            if (!closedSession) return;
+
+            const noticeChatId = getSessionNoticeChatId(closedSession, targetChatId);
+            await sendAttendanceClosedNotice(client, noticeChatId, closedSession, true);
+            logInteraction('OUTGOING', `reply=attendance_auto_closed | session=${closedSession.id} | chat=${noticeChatId || '-'}`);
+        } catch (error) {
+            logInteraction('WARN', `attendance_auto_close_failed | session=${session.id} | error=${error.message}`);
+        }
+    }, delay);
+
+    attendanceAutoCloseTimers.set(session.id, timer);
+}
+
+function restoreAttendanceAutoCloseTimers(client) {
+    const attendance = loadAttendance();
+    const { sessions } = getAttendanceMeta(attendance);
+
+    for (const session of Object.values(sessions)) {
+        if (session?.status === 'open' && session.endTime) {
+            scheduleAttendanceAutoClose(client, session, getSessionNoticeChatId(session));
+        }
+    }
 }
 function getUploadQueue(lid) {
     return uploadQueue.get(lid) || null;
@@ -262,6 +364,9 @@ function findPrimaryMemberByIdentity(identity, options = {}) {
     return matchedEntries[0].member;
 }
 
+function getAttendanceTargetChatId(currentChatId) {
+    return config.botNoticeGroupId || currentChatId;
+}
 function createScheduleFromData(data, chatId, senderName) {
     if (!data.dateKey) return { error: 'tanggal jadwal belum ada.' };
     if (!data.title) return { error: 'nama jadwal belum ada.' };
@@ -343,13 +448,14 @@ async function handleConversationReply(msg, contact, senderName, senderIdentity,
                 return true;
             }
             state.data.title = text;
-            const result = createScheduleFromData(state.data, from, senderName);
+            const attendanceTargetChatId = getAttendanceTargetChatId(from);
+            const result = createScheduleFromData(state.data, attendanceTargetChatId, senderName);
             conversationStates.delete(key);
             if (result.error) {
                 await replyToUser(msg, contact, senderName, result.error);
                 return true;
             }
-            scheduleAttendanceReminder(client, result.session, from);
+            scheduleAttendanceReminder(client, result.session, getAttendanceTargetChatId(from));
             await replyToUser(msg, contact, senderName, `jadwal *${getSessionTitle(result.session)}* terbuat. Silakan lihat jadwal dengan *liat jadwal*.`);
             return true;
         }
@@ -623,13 +729,14 @@ async function handleMessage(msg, client) {
                 break;
             }
 
-            const result = createScheduleFromData(attendanceCommand, from, senderName);
+            const attendanceTargetChatId = getAttendanceTargetChatId(from);
+            const result = createScheduleFromData(attendanceCommand, attendanceTargetChatId, senderName);
             if (result.error) {
                 await replyToUser(msg, contact, senderName, 'format jadwal belum benar. Contoh lengkap: `buat jadwal,21-05-2026,13.00-17.00,pertemuan ketiga`.');
                 break;
             }
 
-            scheduleAttendanceReminder(client, result.session, from);
+            scheduleAttendanceReminder(client, result.session, getAttendanceTargetChatId(from));
             const closeText = result.session.endTime ? ` sampai ${result.session.endTime.replace(':', '.')} WIB` : '';
             await replyToUser(msg, contact, senderName, `jadwal *${getSessionTitle(result.session)}* terbuat untuk ${formatDateKey(result.session.dateKey)} pukul ${result.session.startTime.replace(':', '.')} WIB${closeText}. Lihat semua jadwal dengan *liat jadwal*.`);
             break;
@@ -719,7 +826,8 @@ async function handleMessage(msg, client) {
                 break;
             }
             const attendance = loadAttendance();
-            const session = findOpenSessionForChat(attendance, from) || findRelevantSessionForExcuse(attendance, from);
+            const attendanceTargetChatId = getAttendanceTargetChatId(from);
+            const session = findOpenSessionForChat(attendance, attendanceTargetChatId) || findRelevantSessionForExcuse(attendance, attendanceTargetChatId);
             if (!session) {
                 await replyToUser(msg, contact, senderName, 'belum ada jadwal yang bisa diubah. Buat dulu dengan `buat jadwal`.');
                 break;
@@ -732,6 +840,9 @@ async function handleMessage(msg, client) {
             if (primaryCommand === 'jam absen') session.startTime = timeValue;
             else session.endTime = timeValue;
             saveAttendanceSession(session);
+            if (session.status === 'open' && session.endTime) {
+                scheduleAttendanceAutoClose(client, session, attendanceTargetChatId);
+            }
             await replyToUser(msg, contact, senderName, `jadwal *${getSessionTitle(session)}* diperbarui.\n${formatScheduleList()}`);
             break;
         }
@@ -741,9 +852,10 @@ async function handleMessage(msg, client) {
                 break;
             }
 
-            const session = openAttendanceSession(from, attendanceCommand.title);
-            const closeText = session.endTime ? ` sebelum pukul ${session.endTime.replace(':', '.')} WIB` : ' sebelum absen ditutup';
-            await sendBotNotice(client, `*Absen Dibuka*\n\nAbsen untuk jadwal *${getSessionTitle(session)}* telah dibuka. Silakan ketik *hadir* di grup${closeText}.`);
+            const attendanceTargetChatId = getAttendanceTargetChatId(from);
+            const session = openAttendanceSession(attendanceTargetChatId, attendanceCommand.title);
+            await sendAttendanceOpenedNotice(client, attendanceTargetChatId, session);
+            scheduleAttendanceAutoClose(client, session, attendanceTargetChatId);
             await replyToUser(msg, contact, senderName, `sesi absen *${getSessionTitle(session)}* sudah dibuka. Anggota hanya bisa absen dari grup dengan command *hadir*.`);
             break;
         }
@@ -754,13 +866,15 @@ async function handleMessage(msg, client) {
                 break;
             }
 
-            const session = closeAttendanceSession(from);
+            const attendanceTargetChatId = getAttendanceTargetChatId(from);
+            const session = closeAttendanceSession(attendanceTargetChatId);
             if (!session) {
                 await replyToUser(msg, contact, senderName, 'tidak ada sesi absen yang sedang dibuka.');
                 break;
             }
 
-            await sendBotNotice(client, `*Absen Ditutup*\n\nAbsen untuk jadwal *${getSessionTitle(session)}* telah ditutup. Terima kasih.`);
+            clearAttendanceAutoClose(session.id);
+            await sendAttendanceClosedNotice(client, attendanceTargetChatId, session);
             await replyToUser(msg, contact, senderName, `sesi absen *${getSessionTitle(session)}* ditutup.\n\n${formatAttendanceSessionReport(session)}`);
             break;
         }
@@ -771,7 +885,8 @@ async function handleMessage(msg, client) {
                 break;
             }
 
-            const result = removeAttendanceFromSession(from, attendanceCommand.query);
+            const attendanceTargetChatId = getAttendanceTargetChatId(from);
+            const result = removeAttendanceFromSession(attendanceTargetChatId, attendanceCommand.query);
             if (result.status === 'no_session') {
                 await replyToUser(msg, contact, senderName, 'belum ada sesi absen aktif/terjadwal untuk dikoreksi.');
                 break;
@@ -801,6 +916,11 @@ async function handleMessage(msg, client) {
             const session = findRelevantSessionForExcuse(attendance, from);
             if (!session) {
                 await replyToUser(msg, contact, senderName, 'belum ada jadwal/sesi absen yang bisa menerima izin. Tunggu admin hadir menjadwalkan pertemuan dulu.');
+                break;
+            }
+
+            if (!attendanceCommand.reason || attendanceCommand.reason.trim() === '-' || attendanceCommand.reason.trim().length < 3) {
+                await replyToUser(msg, contact, senderName, 'izin wajib menyertakan alasan. Contoh: `izin, sakit` atau `izin, ada urusan keluarga`. Izin boleh dikirim di grup atau chat pribadi bot.');
                 break;
             }
 
@@ -843,9 +963,16 @@ async function handleMessage(msg, client) {
             await handleGeneralCommand({ command: primaryCommand, msg, contact, senderName, logInteraction, replyToUser, getMentionHandle, getMentionTargets });
             break;
 
+        case 'command':
+        case 'commands':
+        case 'panduan':
+        case 'panduan bot':
+            await handleGeneralCommand({ command: primaryCommand, msg, contact, senderName, logInteraction, replyToUser, getMentionHandle, getMentionTargets });
+            break;
+
         case 'hadir': {
             if (!isGroup) {
-                await replyToUser(msg, contact, senderName, 'absen hadir hanya bisa dilakukan di grup saat sesi absen dibuka oleh admin hadir.');
+                await replyToUser(msg, contact, senderName, 'hadir wajib dilakukan di grup saat sesi absen dibuka. Kalau kamu tidak bisa hadir, kirim izin dengan alasan, contoh: `izin, sakit`.');
                 break;
             }
 
@@ -857,14 +984,10 @@ async function handleMessage(msg, client) {
             }
 
             const nowMs = Date.now();
-            const opensAt = parseWibDateTime(session.dateKey, session.startTime);
             const closesAt = session.endTime ? parseWibDateTime(session.dateKey, session.endTime) : null;
-            if (opensAt && nowMs < opensAt.getTime()) {
-                await replyToUser(msg, contact, senderName, `akses absen untuk *${getSessionTitle(session)}* belum dimulai. Mulai pukul ${session.startTime.replace(':', '.')} WIB.`);
-                break;
-            }
             if (closesAt && nowMs > closesAt.getTime()) {
-                closeAttendanceSession(from);
+                closeAttendanceSessionById(session.id);
+                clearAttendanceAutoClose(session.id);
                 await replyToUser(msg, contact, senderName, `akses absen untuk *${getSessionTitle(session)}* sudah ditutup pukul ${session.endTime.replace(':', '.')} WIB.`);
                 break;
             }
@@ -1080,4 +1203,4 @@ async function handleMessage(msg, client) {
     }
 }
 
-module.exports = { handleMessage };
+module.exports = { handleMessage, restoreAttendanceAutoCloseTimers };

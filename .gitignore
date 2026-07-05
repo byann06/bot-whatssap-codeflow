@@ -32,3 +32,8 @@ google-sheets-service-account.json
 # Dependencies / logs
 logs/
 *.log
+
+# Local backup archives
+*.rar
+*.zip
+*.7z

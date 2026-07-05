@@ -1,36 +1,6 @@
-const MENU_TEXT = `
->>menu - melihat daftar perintah bot 
+const { formatCommandMenu } = require('./commandCatalog');
 
->>link - melihat link penting komunitas
-
->>info - melihat data akun anggota
-
->>daftar - mendaftarkan akun anggota baru
-
->>add - mengubah data diri yang sudah terdaftar
-
->>pemateri - melihat susunan pemateri kegiatan
-
->>jadwalku - melihat giliran kamu sebagai pemateri
-
->>logo - meminta file logo komunitas
-
->>create folder - membuat folder dokumentasi Google Drive
-
->>folder aktif - memilih folder dokumentasi aktif
-
->>share to discord - membagikan link dokumentasi ke Discord
-
->>sirpai - fitur fun untuk mention teman dengan foto sir-pai
-
->>hadir - mencatat kehadiran hari ini
-
->>daftar hadir - melihat rekap kehadiran hari ini
-
->>codeflowchallenge - melihat info challenge season 1
-
->>aspek penilaian - melihat aspek penilaian pemenang
-`;
+const MENU_TEXT = formatCommandMenu();
 
 const LINK_KOMUNITAS = `
 *🌐 Link Komunitas CodeFlow Community*
@@ -52,7 +22,7 @@ const LINK_KOMUNITAS = `
 📌 Foto dan video kegiatan komunitas.
 
 🎮 *Discord*
-👉 https://discord.gg/6A7dNPAK
+👉 https://discord.gg/jzYhNDCU
 📌 Diskusi, sharing, main game bareng, dan interaksi antaar anggota.
 
 🎵 *TikTok*

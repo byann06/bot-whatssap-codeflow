@@ -8,18 +8,20 @@ hadir
 
 Catatan:
 - hanya bisa digunakan saat admin membuka absen
-- biasanya digunakan di grup utama kegiatan
+- wajib digunakan di grup utama kegiatan
+- jika anggota tidak bisa hadir, gunakan izin dengan alasan
 
 ## izin
 Digunakan anggota untuk mengajukan izin jika tidak bisa hadir.
 
 Format:
-izin
 izin, sakit
 izin | ada urusan keluarga
+izin ada urusan keluarga
 
 Catatan:
-- alasan izin bisa ditambahkan
+- alasan izin wajib diisi
+- izin boleh dikirim di grup atau chat pribadi bot
 - anggota tetap tercatat di rekap
 
 ## buka absen
@@ -31,6 +33,8 @@ buka absen,pertemuan ketiga
 
 Catatan:
 - biasanya hanya digunakan admin atau pengurus tertentu
+- saat absen dibuka, bot akan mengingatkan anggota untuk mengisi hadir/izin
+- jika jadwal punya jam tutup, bot akan menutup absen otomatis
 
 ## tutup absen
 Digunakan admin untuk menutup sesi absensi dan membuat rekap.

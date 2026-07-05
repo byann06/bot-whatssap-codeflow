@@ -45,8 +45,8 @@ function parseAttendanceCommand(rawBody) {
     const removeMatch = text.match(/^hapus\s+hadir\s+(.+)$/i);
     if (removeMatch) return { primary: 'hapus hadir', type: 'remove', query: removeMatch[1].trim() };
 
-    const excuseMatch = text.match(/^izin(?:\s*[|,]\s*(.+))?$/i);
-    if (excuseMatch) return { primary: 'izin', type: 'excuse', reason: (excuseMatch[1] || '').trim() };
+    const excuseMatch = text.match(/^izin(?:\s*[|,]\s*(.+)|\s+(.+))?$/i);
+    if (excuseMatch) return { primary: 'izin', type: 'excuse', reason: (excuseMatch[1] || excuseMatch[2] || '').trim() };
 
     const excuseListMatch = text.match(/^daftar\s+izin(?:\s+(.+))?$/i);
     if (excuseListMatch) return { primary: 'daftar izin', type: 'excuse_report', dateKey: normalizeDateInput(excuseListMatch[1]) || getWibDateKey() };

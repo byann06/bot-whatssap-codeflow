@@ -144,6 +144,11 @@ function openAttendanceSession(chatId, title) {
     const attendance = loadAttendance();
     const { sessions, activeByChat } = getAttendanceMeta(attendance);
     const scope = getChatScope(chatId);
+
+    if (activeByChat[scope] && !sessions[activeByChat[scope]]) {
+        delete activeByChat[scope];
+    }
+
     let session = Object.values(sessions)
         .filter((item) => ['scheduled', 'open'].includes(item.status))
         .filter((item) => item.chatId === scope || item.chatId === 'global')
@@ -153,7 +158,29 @@ function openAttendanceSession(chatId, title) {
         const { getWibDateKey } = require('../lib/dateTime');
         const dateKey = getWibDateKey();
         const nowTime = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
-        session = createAttendanceSession(chatId, dateKey, nowTime, title || `Absensi ${formatDateKey(dateKey)}`, 'admin');
+        const safeTitle = String(title || `Absensi ${formatDateKey(dateKey)}`).trim();
+        const idBase = `${dateKey}-${nowTime}-${slugifyId(safeTitle)}`;
+        let id = idBase;
+        let counter = 2;
+        while (sessions[id]) {
+            id = `${idBase}-${counter}`;
+            counter += 1;
+        }
+
+        session = {
+            id,
+            chatId: scope,
+            title: safeTitle,
+            dateKey,
+            startTime: nowTime,
+            status: 'scheduled',
+            createdBy: 'admin',
+            createdAt: new Date().toISOString(),
+            reminderSent: false,
+            records: [],
+            excuses: [],
+        };
+        sessions[id] = session;
     }
 
     session.status = 'open';
@@ -173,6 +200,21 @@ function closeAttendanceSession(chatId) {
     session.closedAt = new Date().toISOString();
     for (const [scope, sessionId] of Object.entries(activeByChat)) {
         if (sessionId === session.id) delete activeByChat[scope];
+    }
+    saveAttendance(attendance);
+    return session;
+}
+
+function closeAttendanceSessionById(sessionId) {
+    const attendance = loadAttendance();
+    const session = findSessionById(attendance, sessionId);
+    if (!session || session.status !== 'open') return null;
+
+    const { activeByChat } = getAttendanceMeta(attendance);
+    session.status = 'closed';
+    session.closedAt = new Date().toISOString();
+    for (const [scope, activeSessionId] of Object.entries(activeByChat)) {
+        if (activeSessionId === session.id) delete activeByChat[scope];
     }
     saveAttendance(attendance);
     return session;
@@ -354,6 +396,7 @@ module.exports = {
     createAttendanceSession,
     openAttendanceSession,
     closeAttendanceSession,
+    closeAttendanceSessionById,
     recordAttendanceInSession,
     recordExcuseInSession,
     removeAttendanceFromSession,

@@ -1,9 +1,12 @@
 {
   "enabled": true,
-  "version": "v0.1.0",
+  "version": "v2.1.0",
   "summary": [
-    "Merapikan struktur folder",
-    "Menambahkan AI multi-provider fallback",
-    "Menambahkan persona Yanverse"
+    "Menambahkan menu lengkap berdasarkan kategori dan akses pengguna",
+    "Menambahkan command `command` untuk mengirim PDF panduan command lengkap",
+    "Menambahkan aturan izin wajib alasan dan hadir wajib di grup",
+    "Menambahkan pengingat absen saat sesi dibuka",
+    "Menambahkan auto-close absen berdasarkan jam tutup",
+    "Memperkuat keamanan Git agar data runtime dan credential tidak ikut commit"
   ]
 }

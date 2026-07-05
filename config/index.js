@@ -1,4 +1,4 @@
-﻿require('dotenv').config();
+require('dotenv').config();
 const path = require('path');
 const { YANVERSE_SYSTEM_PROMPT } = require('../services/ai/persona');
 
@@ -6,6 +6,13 @@ const rootDir = path.join(__dirname, '..');
 
 function csvEnv(name) {
     return (process.env[name] || '').split(',').map((value) => value.trim()).filter(Boolean);
+}
+
+function booleanEnv(name, defaultValue = false) {
+    const rawValue = process.env[name];
+    if (rawValue === undefined) return defaultValue;
+
+    return ['1', 'true', 'yes', 'on'].includes(String(rawValue).trim().toLowerCase());
 }
 
 const dataDir = path.join(rootDir, 'data');
@@ -35,6 +42,7 @@ module.exports = {
     botNoticeGroupId: process.env.BOT_NOTICE_GROUP_ID || '',
     messageMaxAgeSeconds: Number(process.env.BOT_MAX_MESSAGE_AGE_SECONDS || 120),
     maintenance: {
+        noticeEnabled: booleanEnv('MAINTENANCE_NOTICE_ENABLED', false),
         startGifUrl: process.env.MAINTENANCE_GIF_URL || 'https://media.giphy.com/media/KQoQzycVECd9xUNpeP/giphy.mp4',
         doneGifUrl: process.env.MAINTENANCE_DONE_GIF_URL || 'https://media.giphy.com/media/ymjrojYpcJSMpZ9wRA/giphy.mp4',
     },

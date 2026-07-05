@@ -64,15 +64,16 @@ const HELP_TOPICS = {
     absen: {
         title: 'Help Absen',
         lines: [
-            '`hadir` - isi hadir saat sesi dibuka',
-            '`izin, alasan kamu` - ajukan izin',
+            '`hadir` - isi hadir saat sesi dibuka, wajib di grup',
+            '`izin, alasan kamu` - ajukan izin, alasan wajib diisi',
             '`daftar hadir` - lihat daftar hadir',
             '`daftar izin` - lihat daftar izin',
+            'Izin boleh dikirim di grup atau chat pribadi bot.',
             '',
             'Admin hadir:',
             '`buka absen` - buka sesi absen aktif',
             '`buka absen,pertemuan 4` - buka sesi tertentu',
-            '`tutup absen` - tutup sesi absen',
+            '`tutup absen` - tutup sesi absen manual',
             '`hapus hadir <nama>` - hapus anggota dari hadir',
         ],
     },
@@ -86,7 +87,7 @@ const HELP_TOPICS = {
             '`ubah jadwal,1,nama,pertemuan 4` - ubah nama sesi',
             '`hapus jadwal,1` - hapus jadwal',
             '`jam absen 13.00` - isi jam buka absen saat mode tanya-jawab',
-            '`close absen 17.00` - isi jam tutup absen',
+            '`close absen 17.00` - isi jam tutup absen, bot akan menutup otomatis',
         ],
     },
     drive: {
